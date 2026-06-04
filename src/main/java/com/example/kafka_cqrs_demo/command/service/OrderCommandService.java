@@ -67,9 +67,6 @@ public class OrderCommandService {
         return orderId;
     }
 
-    /**
-     * 專注於 DB 交易的隔離方法
-     */
     @Transactional
     public void saveOrderToDb(String orderId, String productId, int quantity, long price) {
         OrderEntity entity = new OrderEntity();

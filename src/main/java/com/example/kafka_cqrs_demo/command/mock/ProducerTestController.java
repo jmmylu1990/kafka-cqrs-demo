@@ -4,6 +4,8 @@ import com.example.kafka_cqrs_demo.command.dto.CreateOrderRequest;
 import com.example.kafka_cqrs_demo.config.KafkaTopicConfig;
 import com.example.kafka_cqrs_demo.event.OrderCreatedEvent;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.kafka.common.errors.TimeoutException;
+import org.springframework.kafka.support.SendResult;
 import tools.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Profile;
@@ -15,7 +17,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @RestController
 @RequestMapping("/api/test")
@@ -160,6 +164,59 @@ public class ProducerTestController {
             return ResponseEntity.ok("【高併發消費測試送出】請快去 Console 驗證高併發肉搏攔截 Log！ID: " + mockOrderId);
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body("高併發測試失敗: " + e.getMessage());
+        }
+    }
+
+    @PostMapping("/retry-simulation")
+    public ResponseEntity<String> simulateProducerRetry(@RequestBody CreateOrderRequest request) {
+        try {
+            String mockOrderId = UUID.randomUUID().toString();
+            OrderCreatedEvent event = new OrderCreatedEvent(
+                mockOrderId, request.getProductId(), request.getQuantity(), request.getPrice()
+            );
+            String jsonEvent = objectMapper.writeValueAsString(event);
+
+            log.info("🚀 [自動化重試測試] 啟動！利用純 Java 匿名物件模擬網路中斷... ID: {}", mockOrderId);
+
+            // 1. 核心黑科技：利用匿名內部類別覆寫 send 方法，內建計數器狀態機
+            KafkaTemplate<String, String> spyKafkaTemplate =
+                new org.springframework.kafka.core.KafkaTemplate<String, String>(kafkaTemplate.getProducerFactory()) {
+
+                    // 用一個原子計數器記錄呼叫次數
+                    private final AtomicInteger callCount = new java.util.concurrent.atomic.AtomicInteger(0);
+
+                    @Override
+                    public CompletableFuture<SendResult<String, String>> send(
+                        String topic, String key, String data) {
+
+                        int currentCall = callCount.incrementAndGet();
+                        if (currentCall == 1) {
+                            // 📡 第一次呼叫：故意拋出 Kafka 原生超時異常，模擬突發性網路中斷
+                            throw new TimeoutException(
+                                "【模擬突發性網路中斷】1000 ms has passed since batch creation plus linger time."
+                            );
+                        }
+                        // 🔄 第二次及之後的呼叫：完美放行，呼叫原本真實的 KafkaTemplate 發送
+                        return kafkaTemplate.send(topic, key, data);
+                    }
+                };
+
+            // 2. 發動第一次發送（這筆在內部會直接觸發 currentCall == 1，噴出 Timeout 異常）
+            try {
+                log.info("📡 [第一次發送嘗試] 故意製造網路抖動...");
+                spyKafkaTemplate.send(KafkaTopicConfig.TOPIC_NAME, mockOrderId, jsonEvent);
+            } catch (Exception e) {
+                log.warn("⚠️ [生產端攔截預期異常] 第一次發送確實超時失敗了！錯誤訊息: {}", e.getMessage());
+
+                // 3. 🚀 【核心重試模擬】：當業務層面捕捉到超時後，發動第二次重試補償（觸發 currentCall == 2，成功射出）
+                log.info("🔄 [啟動生產端自動補償機制] 正在發動第二次等冪性重試發送... ID: {}", mockOrderId);
+                spyKafkaTemplate.send(KafkaTopicConfig.TOPIC_NAME, mockOrderId, jsonEvent);
+            }
+
+            return ResponseEntity.ok("【自動化重試測試成功】請去 Console 觀察重試與 Consumer 最終的一體性。ID: " + mockOrderId);
+        } catch (Exception e) {
+            log.error("重試模擬異常", e);
+            return ResponseEntity.internalServerError().body("重試模擬失敗: " + e.getMessage());
         }
     }
 }

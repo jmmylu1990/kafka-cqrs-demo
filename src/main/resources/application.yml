@@ -1,9 +1,13 @@
 server:
-  port: 8081 # 1. 設定 Spring Boot 埠口為 8081
+  port: 8081 # 設定 Spring Boot 埠口為 8081
 
 spring:
   application:
     name: kafka-cqrs-demo
+
+  main:
+    allow-bean-definition-overriding: true
+
   # ==========================================
   # 1. 資料庫連線 (Datasource Configuration)
   # ==========================================
@@ -32,10 +36,12 @@ spring:
         format_sql: true
 
   # ==========================================
-  # 3. Kafka 分散式佇列設定
+  # 3. Kafka 分散式佇列與重試機制設定
   # ==========================================
   kafka:
     bootstrap-servers: localhost:9092
+    listener:
+      observation-enabled: true # 點亮 Kafka 消費端的全自動觀測攔截
 
     # 讀取端 Consumer 設定
     consumer:
@@ -45,19 +51,35 @@ spring:
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 
     # 寫入端 Producer 設定
-    # 寫入端 Producer 設定
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
-
-      # 1. 隸屬於 producer 層級
       ack: all
       retries: 3
-
-      # 2. 原生屬性容器層級
       properties:
-        # 🟢 【這次真的改了！】這裡必須縮進 4 個空格 (比 properties 多 2 格)
         enable.idempotence: true
-
-        # 🟢 【核心大修正】因為含有點點 (.)，必須用雙引號包起來，否則 Spring 語法解析會壞掉！
         "max.in.flight.requests.per.connection": 5
+
+    # 重試機制獨立在 kafka 底下，與 producer/consumer 平級
+    retry:
+      topic:
+        backoff:
+          delay: 2000         # 初始延遲 2 秒
+          multiplier: 2.0     # 退避倍率 2 倍
+
+# ==========================================
+# 4. Spring Boot 4.0 標準觀測台設定（已移除 Zipkin 導流）
+# ==========================================
+management:
+  endpoint:
+    health:
+      show-details: always
+  endpoints:
+    web:
+      exposure:
+        include: "*" # 保留解封 Actuator 監聽端點，方便未來健康稽核
+  tracing:
+    sampling:
+      probability: 1.0  # 100% 全量採樣
+    propagation:
+      type: w3c         # 保持 W3C 標準協議，確保 Trace 上下文在內部正常運轉
