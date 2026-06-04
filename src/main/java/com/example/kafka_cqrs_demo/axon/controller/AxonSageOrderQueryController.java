@@ -7,6 +7,8 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Set;
+
 /**
  * 查詢控制器 (Query Controller)
  * CQRS 的核心在於讀寫分離。
@@ -36,11 +38,22 @@ public class AxonSageOrderQueryController {
         String orderJson = redisTemplate.opsForValue().get("order:" + orderId);
 
         if (orderJson == null) {
-            log.warn("⚠訂單不存在，ID: {}", orderId);
+            log.warn("訂單不存在，ID: {}", orderId);
             return "訂單不存在";
         }
 
-        log.info("✅ 查詢成功，返回訂單資料");
+        log.info("查詢成功，返回訂單資料");
         return orderJson;
+    }
+
+    /**
+     * 查詢所有訂單 ID 的列表。
+     * 流程：讀取 Redis Set -> 返回 ID 清單。
+     */
+    @GetMapping("/all")
+    public Set<String> getAllOrderIds() {
+        log.info("查詢所有訂單 ID 列表");
+        // SMEMBERS 是 Redis 的命令，取得集合內所有成員
+        return redisTemplate.opsForSet().members("orders:all");
     }
 }

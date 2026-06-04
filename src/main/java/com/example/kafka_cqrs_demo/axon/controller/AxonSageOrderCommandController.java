@@ -1,14 +1,15 @@
 package com.example.kafka_cqrs_demo.axon.controller;
 
 import com.example.kafka_cqrs_demo.axon.command.AxonSagaCreateOrderCommand;
+import com.example.kafka_cqrs_demo.axon.command.CancelOrderCommand;
+import com.example.kafka_cqrs_demo.axon.command.ConfirmPaymentCommand;
+import com.example.kafka_cqrs_demo.axon.dto.CancelOrderRequest;
+import com.example.kafka_cqrs_demo.axon.dto.PayOrderRequest;
 import com.example.kafka_cqrs_demo.legacy.command.dto.CreateOrderRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.gateway.CommandGateway;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -68,5 +69,16 @@ public class AxonSageOrderCommandController {
                 log.info(" Command 發送成功，返回: " + result);
                 return result.toString();
             });
+    }
+
+    @PostMapping("/pay")
+    public CompletableFuture<String> payOrder(@RequestBody PayOrderRequest request) {
+
+        return commandGateway.send(new ConfirmPaymentCommand(request.getOrderId()));
+    }
+
+    @PostMapping("/cancel")
+    public CompletableFuture<String> cancelOrder(@RequestBody CancelOrderRequest request) {
+        return commandGateway.send(new CancelOrderCommand(request.getOrderId(), request.getReason()));
     }
 }

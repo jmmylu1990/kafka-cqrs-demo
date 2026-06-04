@@ -1,7 +1,12 @@
 package com.example.kafka_cqrs_demo.axon.aggregate;
 
 import com.example.kafka_cqrs_demo.axon.command.AxonSagaCreateOrderCommand;
+import com.example.kafka_cqrs_demo.axon.command.CancelOrderCommand;
+import com.example.kafka_cqrs_demo.axon.command.ConfirmPaymentCommand;
+import com.example.kafka_cqrs_demo.axon.enums.OrderStatus;
+import com.example.kafka_cqrs_demo.axon.event.OrderCancelledEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderCreatedEvent;
+import com.example.kafka_cqrs_demo.axon.event.OrderPaidEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.CommandHandler;
 import org.axonframework.eventsourcing.EventSourcingHandler;
@@ -12,51 +17,42 @@ import static org.axonframework.modelling.command.AggregateLifecycle.apply;
 
 /**
  * 訂單聚合根 (Order Aggregate)
- * 聚合根是領域模型的邊界，所有關於「訂單」的業務變更都必須透過它來進行。
- * 這裡確保了資料的一致性與業務邏輯的封裝。
+ * 聚合根是領域驅動設計 (DDD) 的邊界，所有關於「訂單」的業務變更都必須透過它來進行。
+ * 它確保了訂單資料的一致性、業務規則的執行，以及狀態變更的完整性。
  */
 @Slf4j
 @Aggregate
 public class AxonSagaOrderAggregate {
 
-    /**
-     * @AggregateIdentifier 是聚合根的唯一識別 ID。
-     * 它必須對應到 Command 中的 @TargetAggregateIdentifier。
-     * Axon 透過此 ID 將指令 (Command) 路由到正確的物件實體。
-     */
+    /** 聚合根 ID，作為事件儲存的唯一索引 */
     @AggregateIdentifier
     private String orderId;
     private String productId;
     private int quantity;
     private long price;
 
-    /**
-     * 無參建構子 (No-argument Constructor)
-     * 這是 Axon 的技術需求。當從 Event Store 恢復 Aggregate 狀態時，
-     * Axon 會利用反射機制呼叫此建構子建立空物件，再逐一重放 (Replay) 事件。
-     */
-    protected AxonSagaOrderAggregate() {
-    }
+    /** 訂單狀態：管理訂單生命週期的核心欄位 */
+    private OrderStatus status;
 
     /**
-     * 指令處理器 (Command Handler)
-     * 當 CommandGateway 發送 CreateOrderCommand 時，Axon 會找到此處進行處理。
-     * * 職責：
-     * 1. 執行商業規則檢查 (如：價格是否 > 0，庫存是否足夠)。
-     * 2. 若規則通過，執行 apply() 方法將變更「發布」為事件。
+     * 無參建構子：Axon 的技術需求。
+     * 當從 Event Store 恢復 Aggregate 狀態時，Axon 會呼叫此建構子建立空物件，
+     * 並透過 EventSourcingHandler 重放事件來恢復內部欄位的值。
+     */
+    protected AxonSagaOrderAggregate() {}
+
+    /**
+     * 訂單建立指令處理器 (Command Handler)
+     * 處理建立訂單的意圖。在建立前執行商業規則檢查，確認資料合法性。
      */
     @CommandHandler
     public AxonSagaOrderAggregate(AxonSagaCreateOrderCommand command) {
-        log.info("DEBUG: Aggregate 接收到指令: {}" ,command.getClass().getName());
-        // [商業驗證區]
+        log.info("DEBUG: Aggregate 接收到建立指令: {}", command.getOrderId());
         if (command.getPrice() < 0) {
             throw new IllegalArgumentException("價格不能為負數");
         }
 
-        // [發布事件]
-        // apply() 會做兩件事：
-        // 1. 將事件存入 Event Store (持久化)。
-        // 2. 觸發下方的 @EventSourcingHandler 來更新本物件狀態。
+        // 發布事件：此動作會持久化至 Event Store，並觸發下方的 on() 事件處理器
         apply(new OrderCreatedEvent(
             command.getOrderId(),
             command.getProductId(),
@@ -66,19 +62,54 @@ public class AxonSagaOrderAggregate {
     }
 
     /**
-     * 事件來源處理器 (Event Sourcing Handler)
-     * 這是「更新自身狀態」的地方。
-     * * 職責：
-     * 當事件發生後，Axon 會呼叫此方法來更新物件的欄位。
-     * 注意：此方法「絕對不能」包含業務邏輯驗證，它只負責「賦值」。
-     * 因為在系統重啟時，Axon 會重放所有歷史事件，每次重放都會呼叫此方法。
+     * 付款指令處理器
+     * [狀態機邏輯]：只有 CREATED 狀態的訂單才允許進入 PAID 狀態。
      */
+    @CommandHandler
+    public void handle(ConfirmPaymentCommand command) {
+        log.info("處理付款指令: {}", command.getOrderId());
+        if (this.status != OrderStatus.CREATED) {
+            throw new IllegalStateException("只有已建立的訂單才能付款，當前狀態: " + this.status);
+        }
+        apply(new OrderPaidEvent(this.orderId));
+    }
+
+    /**
+     * 取消指令處理器
+     * [狀態機邏輯]：透過檢查當前狀態，防止訂單在出貨或送達後被錯誤取消。
+     */
+    @CommandHandler
+    public void handle(CancelOrderCommand command) {
+        if (this.status == OrderStatus.SHIPPED || this.status == OrderStatus.DELIVERED) {
+            throw new IllegalStateException("已出貨或送達的訂單無法取消");
+        }
+        // 將 command 中的 reason 傳給事件
+        apply(new OrderCancelledEvent(command.getOrderId(), command.getReason()));
+    }
+
+    // --- 事件來源處理器 (Event Sourcing Handlers) ---
+    // 這些方法「不包含」業務邏輯，僅負責「狀態賦值」。
+    // 它們是事件溯源 (Event Sourcing) 的靈魂，確保資料恢復時能回到正確的狀態。
+
     @EventSourcingHandler
     public void on(OrderCreatedEvent event) {
-        log.info("[EventSourcingHandler] 狀態已更新: {}" ,event.getOrderId());
+        log.info("[EventSourcingHandler] 訂單建立，初始化狀態: {}", event.getOrderId());
         this.orderId = event.getOrderId();
         this.productId = event.getProductId();
         this.quantity = event.getQuantity();
         this.price = event.getPrice();
+        this.status = OrderStatus.CREATED;
+    }
+
+    @EventSourcingHandler
+    public void on(OrderPaidEvent event) {
+        log.info("[EventSourcingHandler] 訂單已付款: {}", this.orderId);
+        this.status = OrderStatus.PAID;
+    }
+
+    @EventSourcingHandler
+    public void on(OrderCancelledEvent event) {
+        this.status = OrderStatus.CANCELLED;
+        log.info("[EventSourcingHandler] 訂單已取消，原因: {}", event.getReason());
     }
 }
