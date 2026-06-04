@@ -1,4 +1,4 @@
-package com.example.kafka_cqrs_demo.event;
+package com.example.kafka_cqrs_demo.legacy.event;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;

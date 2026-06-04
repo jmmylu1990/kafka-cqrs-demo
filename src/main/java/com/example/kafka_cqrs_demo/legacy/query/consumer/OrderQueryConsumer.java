@@ -1,7 +1,7 @@
-package com.example.kafka_cqrs_demo.query.consumer;
+package com.example.kafka_cqrs_demo.legacy.query.consumer;
 
-import com.example.kafka_cqrs_demo.event.OrderCreatedEvent;
-import com.example.kafka_cqrs_demo.query.service.OrderQueryService;
+import com.example.kafka_cqrs_demo.legacy.event.OrderCreatedEvent;
+import com.example.kafka_cqrs_demo.legacy.query.service.OrderQueryService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.kafka.annotation.DltHandler;

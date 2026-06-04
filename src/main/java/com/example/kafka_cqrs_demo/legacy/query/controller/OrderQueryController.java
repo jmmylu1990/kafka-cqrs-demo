@@ -1,7 +1,7 @@
-package com.example.kafka_cqrs_demo.query.controller;
+package com.example.kafka_cqrs_demo.legacy.query.controller;
 
-import com.example.kafka_cqrs_demo.event.OrderCreatedEvent;
-import com.example.kafka_cqrs_demo.query.service.OrderQueryService;
+import com.example.kafka_cqrs_demo.legacy.event.OrderCreatedEvent;
+import com.example.kafka_cqrs_demo.legacy.query.service.OrderQueryService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;

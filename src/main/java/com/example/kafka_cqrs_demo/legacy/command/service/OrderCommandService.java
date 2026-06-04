@@ -1,8 +1,8 @@
-package com.example.kafka_cqrs_demo.command.service;
+package com.example.kafka_cqrs_demo.legacy.command.service;
 
-import com.example.kafka_cqrs_demo.command.domain.OrderEntity;
-import com.example.kafka_cqrs_demo.command.repository.OrderCommandRepository;
-import com.example.kafka_cqrs_demo.event.OrderCreatedEvent;
+import com.example.kafka_cqrs_demo.legacy.command.domain.OrderEntity;
+import com.example.kafka_cqrs_demo.legacy.command.repository.OrderCommandRepository;
+import com.example.kafka_cqrs_demo.legacy.event.OrderCreatedEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.beans.factory.annotation.Autowired;

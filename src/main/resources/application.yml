@@ -5,9 +5,6 @@ spring:
   application:
     name: kafka-cqrs-demo
 
-  main:
-    allow-bean-definition-overriding: true
-
   # ==========================================
   # 1. 資料庫連線 (Datasource Configuration)
   # ==========================================
@@ -66,20 +63,7 @@ spring:
         backoff:
           delay: 2000         # 初始延遲 2 秒
           multiplier: 2.0     # 退避倍率 2 倍
-
-# ==========================================
-# 4. Spring Boot 4.0 標準觀測台設定（已移除 Zipkin 導流）
-# ==========================================
-management:
-  endpoint:
-    health:
-      show-details: always
-  endpoints:
-    web:
-      exposure:
-        include: "*" # 保留解封 Actuator 監聽端點，方便未來健康稽核
-  tracing:
-    sampling:
-      probability: 1.0  # 100% 全量採樣
-    propagation:
-      type: w3c         # 保持 W3C 標準協議，確保 Trace 上下文在內部正常運轉
+  axon:
+    axonserver:
+      servers: localhost:8124
+      context: default # 這裡明確指定 context 為 default

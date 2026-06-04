@@ -1,6 +1,6 @@
-package com.example.kafka_cqrs_demo.query.service;
+package com.example.kafka_cqrs_demo.legacy.query.service;
 
-import com.example.kafka_cqrs_demo.event.OrderCreatedEvent;
+import com.example.kafka_cqrs_demo.legacy.event.OrderCreatedEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;

@@ -1,4 +1,4 @@
-package com.example.kafka_cqrs_demo.command.dto;
+package com.example.kafka_cqrs_demo.legacy.command.dto;
 
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;

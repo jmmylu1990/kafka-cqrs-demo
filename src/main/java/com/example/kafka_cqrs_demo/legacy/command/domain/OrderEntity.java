@@ -1,4 +1,4 @@
-package com.example.kafka_cqrs_demo.command.domain;
+package com.example.kafka_cqrs_demo.legacy.command.domain;
 
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;

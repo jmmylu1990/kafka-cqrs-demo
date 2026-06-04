@@ -1,8 +1,8 @@
-package com.example.kafka_cqrs_demo.command.controller;
+package com.example.kafka_cqrs_demo.legacy.command.controller;
 
-import com.example.kafka_cqrs_demo.command.dto.CreateOrderRequest;
-import com.example.kafka_cqrs_demo.command.dto.OrderCommandResponse; // 引入剛建立的 DTO
-import com.example.kafka_cqrs_demo.command.service.OrderCommandService;
+import com.example.kafka_cqrs_demo.legacy.command.dto.CreateOrderRequest;
+import com.example.kafka_cqrs_demo.legacy.command.dto.OrderCommandResponse; // 引入剛建立的 DTO
+import com.example.kafka_cqrs_demo.legacy.command.service.OrderCommandService;
 import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;

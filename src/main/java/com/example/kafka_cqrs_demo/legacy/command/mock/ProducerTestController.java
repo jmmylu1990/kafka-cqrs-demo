@@ -1,14 +1,13 @@
-package com.example.kafka_cqrs_demo.command.mock;
+package com.example.kafka_cqrs_demo.legacy.command.mock;
 
-import com.example.kafka_cqrs_demo.command.dto.CreateOrderRequest;
-import com.example.kafka_cqrs_demo.config.KafkaTopicConfig;
-import com.example.kafka_cqrs_demo.event.OrderCreatedEvent;
+import com.example.kafka_cqrs_demo.legacy.command.dto.CreateOrderRequest;
+import com.example.kafka_cqrs_demo.legacy.config.KafkaTopicConfig;
+import com.example.kafka_cqrs_demo.legacy.event.OrderCreatedEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.springframework.kafka.support.SendResult;
 import tools.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Profile;
 import org.springframework.http.ResponseEntity;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.web.bind.annotation.PostMapping;
