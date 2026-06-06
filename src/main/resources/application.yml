@@ -64,6 +64,10 @@ spring:
           delay: 2000         # 初始延遲 2 秒
           multiplier: 2.0     # 退避倍率 2 倍
   axon:
-    axonserver:
-      servers: localhost:8124
-      context: default # 這裡明確指定 context 為 default
+    serializer:
+      general: xstream     # 🟢 萬能相容安全牌，用它來序列化內部 Command
+      events: jackson      # 🚚 讓傳輸的 Event 保持清爽的 JSON 格式
+      messages: jackson
+      axonserver:
+        servers: localhost:8124
+        context: default
