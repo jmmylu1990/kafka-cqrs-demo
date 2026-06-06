@@ -63,11 +63,15 @@ spring:
         backoff:
           delay: 2000         # 初始延遲 2 秒
           multiplier: 2.0     # 退避倍率 2 倍
-  axon:
-    serializer:
-      general: xstream     # 🟢 萬能相容安全牌，用它來序列化內部 Command
-      events: jackson      # 🚚 讓傳輸的 Event 保持清爽的 JSON 格式
-      messages: jackson
-      axonserver:
-        servers: localhost:8124
-        context: default
+axon:
+  axonserver:
+    # 💡 強制指定連線位址與 Context
+    servers: localhost:8124
+    context: default
+    # 💡 增加這兩行設定，這在處理 gRPC 握手失敗時特別有效
+    connect-timeout: 60000
+    keep-alive-time: 60000
+  serializer:
+    general: xstream
+    events: xstream
+    messages: xstream

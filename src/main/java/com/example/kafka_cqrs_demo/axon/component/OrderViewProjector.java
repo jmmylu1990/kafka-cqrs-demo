@@ -4,6 +4,7 @@ import com.example.kafka_cqrs_demo.axon.enums.OrderStatus;
 import com.example.kafka_cqrs_demo.axon.event.OrderCancelledEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderCreatedEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderPaidEvent;
+import com.example.kafka_cqrs_demo.axon.event.OrderStockReservedEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.eventhandling.EventHandler;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -62,7 +63,7 @@ public class OrderViewProjector {
      */
     @EventHandler
     public void on(OrderPaidEvent event) {
-        updateOrderStatus(event.getOrderId(), OrderStatus.PAID);
+        updateOrderStatus(event.getOrderId(), OrderStatus.PAID, event.getReason());
     }
 
     /**
@@ -70,7 +71,7 @@ public class OrderViewProjector {
      */
     @EventHandler
     public void on(OrderCancelledEvent event) {
-        updateOrderStatus(event.getOrderId(), OrderStatus.CANCELLED);
+        updateOrderStatus(event.getOrderId(), OrderStatus.CANCELLED, event.getReason());
     }
 
     /**
@@ -79,27 +80,39 @@ public class OrderViewProjector {
      * * @param orderId 訂單識別碼
      * @param status 要更新的目標狀態 (OrderStatus 枚舉)
      */
-    private void updateOrderStatus(String orderId, OrderStatus status) {
+    private void updateOrderStatus(String orderId, OrderStatus status, String reason) {
         String key = "order:" + orderId;
         String json = redisTemplate.opsForValue().get(key);
 
         if (json != null) {
             try {
-                // 1. 解析 JSON 字串為 JsonNode，便於操作屬性
                 JsonNode rootNode = objectMapper.readTree(json);
+                ObjectNode objectNode = (ObjectNode) rootNode;
 
-                // 2. 更新 status 欄位 (透過 ObjectNode 進行操作)
-                ((ObjectNode) rootNode).put("status", status.name());
+                // 更新狀態
+                objectNode.put("status", status.name());
 
-                // 3. 將修改後的物件寫回 Redis，完成資料同步
+                // 如果有原因才寫入
+                if (reason != null && !reason.isEmpty()) {
+                    objectNode.put("cancelReason", reason);
+                }
+
                 redisTemplate.opsForValue().set(key, rootNode.toString());
                 log.info("Redis 更新成功: 訂單 {} 狀態變更為 {}", orderId, status);
             } catch (Exception e) {
                 log.error("更新 Redis 狀態失敗: ID {}, Error: {}", orderId, e.getMessage());
             }
         } else {
-            // 若 Redis 中找不到該 Key，代表投影層與事件流可能出現了非預期的資料不一致
             log.warn("⚠嘗試更新不存在的訂單狀態: {}", orderId);
         }
     }
+
+    @EventHandler
+    public void on(OrderStockReservedEvent event) {
+        log.info("[Projection] 庫存預留成功，更新 Redis 狀態為 PENDING_PAYMENT: {}", event.getOrderId());
+        // 這裡調用你現有的 update 方法
+        updateOrderStatus(event.getOrderId(), OrderStatus.PENDING_PAYMENT, "付款中");
+    }
+
+
 }

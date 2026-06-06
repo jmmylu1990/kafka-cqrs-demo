@@ -3,10 +3,12 @@ package com.example.kafka_cqrs_demo.axon.aggregate;
 import com.example.kafka_cqrs_demo.axon.command.AxonSagaCreateOrderCommand;
 import com.example.kafka_cqrs_demo.axon.command.CancelOrderCommand;
 import com.example.kafka_cqrs_demo.axon.command.ConfirmPaymentCommand;
+import com.example.kafka_cqrs_demo.axon.command.ConfirmStockReservedCommand;
 import com.example.kafka_cqrs_demo.axon.enums.OrderStatus;
 import com.example.kafka_cqrs_demo.axon.event.OrderCancelledEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderCreatedEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderPaidEvent;
+import com.example.kafka_cqrs_demo.axon.event.OrderStockReservedEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.CommandHandler;
 import org.axonframework.eventsourcing.EventSourcingHandler;
@@ -30,6 +32,8 @@ public class AxonSagaOrderAggregate {
     private String productId;
     private int quantity;
     private long price;
+
+    private String reason;
 
     /** 訂單狀態：管理訂單生命週期的核心欄位 */
     private OrderStatus status;
@@ -63,15 +67,25 @@ public class AxonSagaOrderAggregate {
 
     /**
      * 付款指令處理器
-     * [狀態機邏輯]：只有 CREATED 狀態的訂單才允許進入 PAID 狀態。
+     * [狀態機邏輯]：
+     * 1. 為了確保業務流程的順序性，訂單必須先經過「庫存預扣」階段才能付款。
+     * 2. 允許從 PENDING_PAYMENT (已成功鎖定庫存) 或特殊情況下的 CREATED (若無庫存機制) 進行付款。
+     * 3. 若狀態不符，說明流程異常或重複付款，拋出異常以拒絕指令。
      */
     @CommandHandler
     public void handle(ConfirmPaymentCommand command) {
         log.info("處理付款指令: {}", command.getOrderId());
-        if (this.status != OrderStatus.CREATED) {
-            throw new IllegalStateException("只有已建立的訂單才能付款，當前狀態: " + this.status);
+
+        // 防禦性檢查：防止非預期的狀態變更
+        boolean isEligibleForPayment = (this.status == OrderStatus.PENDING_PAYMENT);
+
+        if (!isEligibleForPayment) {
+            log.error("付款失敗：訂單 {} 當前狀態 {} 不允許執行付款", this.orderId, this.status);
+            throw new IllegalStateException("訂單目前狀態不允許付款: " + this.status);
         }
-        apply(new OrderPaidEvent(this.orderId));
+
+        // 業務規則通過，發布付款成功事件
+        apply(new OrderPaidEvent(this.orderId, "已付款"));
     }
 
     /**
@@ -87,6 +101,12 @@ public class AxonSagaOrderAggregate {
         apply(new OrderCancelledEvent(command.getOrderId(), command.getReason()));
     }
 
+    @CommandHandler
+    public void handle(ConfirmStockReservedCommand command) {
+        log.info("處理確認庫存保留指令: {}", command.getOrderId());
+        apply(new OrderStockReservedEvent(command.getOrderId()));
+    }
+
     // --- 事件來源處理器 (Event Sourcing Handlers) ---
     // 這些方法「不包含」業務邏輯，僅負責「狀態賦值」。
     // 它們是事件溯源 (Event Sourcing) 的靈魂，確保資料恢復時能回到正確的狀態。
@@ -94,10 +114,14 @@ public class AxonSagaOrderAggregate {
     @EventSourcingHandler
     public void on(OrderCreatedEvent event) {
         log.info("[EventSourcingHandler] 訂單建立，初始化狀態: {}", event.getOrderId());
+
+        // 將所有需要的屬性進行初始化
         this.orderId = event.getOrderId();
         this.productId = event.getProductId();
         this.quantity = event.getQuantity();
         this.price = event.getPrice();
+
+        // 設定狀態
         this.status = OrderStatus.CREATED;
     }
 
@@ -112,4 +136,13 @@ public class AxonSagaOrderAggregate {
         this.status = OrderStatus.CANCELLED;
         log.info("[EventSourcingHandler] 訂單已取消，原因: {}", event.getReason());
     }
+
+    @EventSourcingHandler
+    public void on(OrderStockReservedEvent event) {
+        // [狀態變更]：當 Saga 確保庫存預留成功，Aggregate 同步更新狀態
+        this.status = OrderStatus.PENDING_PAYMENT;
+        log.info("[EventSourcingHandler] 庫存預留成功，訂單狀態變更為 PENDING_PAYMENT");
+    }
+
+
 }

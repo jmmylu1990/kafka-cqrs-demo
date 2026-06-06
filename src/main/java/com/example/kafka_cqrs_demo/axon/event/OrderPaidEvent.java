@@ -8,4 +8,9 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public @Data class OrderPaidEvent {
     private String orderId;
+    private String reason;
+
+    public OrderPaidEvent(String orderId) {
+        this.orderId = orderId;
+    }
 }
