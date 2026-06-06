@@ -16,6 +16,14 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.util.concurrent.TimeUnit;
 
+/**
+ * 傳統模式讀取端 Kafka 事件消費者 (Legacy Order Query Consumer)
+ * <p>
+ * 本類別負責監聽並消費 Kafka 中的 "order-events" 主題。
+ * 為了解決高併發場景下的訊息重複消費問題，本消費者實作了基於 Redis SETNX 的分散式去重鎖防禦；
+ * 同時，結合 Spring Kafka 的 {@link RetryableTopic} 提供非同步指數退避重試與死信佇列 (DLT) 處理。
+ * </p>
+ */
 @Component
 @Slf4j
 public class OrderQueryConsumer {
@@ -24,6 +32,13 @@ public class OrderQueryConsumer {
     private final ObjectMapper objectMapper;
     private final StringRedisTemplate redisTemplate;
 
+    /**
+     * 消費者建構子。
+     *
+     * @param orderQueryService 讀取模型同步服務
+     * @param objectMapper Jackson ObjectMapper 實例
+     * @param redisTemplate Redis 模板實例
+     */
     public OrderQueryConsumer(OrderQueryService orderQueryService,
                               ObjectMapper objectMapper,
                               StringRedisTemplate redisTemplate) {
@@ -33,11 +48,29 @@ public class OrderQueryConsumer {
     }
 
     /**
-     * 消費端：內建「非同步指數退避重試」與「分散式去重鎖」防禦完全體
+     * 處理訂單建立事件的消費者核心方法。
+     * <p>
+     * <b>配置詳解 (@RetryableTopic)：</b>
+     * <ul>
+     *   <li>attempts = "3"：代表該訊息最多執行 3 次消費（1 次原始嘗試 + 2 次重試）。</li>
+     *   <li>dltStrategy = DltStrategy.FAIL_ON_ERROR：當重試次數用盡依然失敗時，將訊息送入死信佇列。</li>
+     *   <li>include = { RuntimeException.class }：僅針對 RuntimeException 及其子類進行重試。</li>
+     * </ul>
+     * </p>
+     * <p>
+     * <b>去重鎖與重試優化邏輯：</b>
+     * 1. 藉由 Redis 的 {@code setIfAbsent} 設置為期 10 分鐘的去重鎖，防止短時間內重複消費相同訊息。
+     * 2. 若鎖已存在，說明該訊息已被消費或正在處理，主動攔截並返回。
+     * 3. 若在處理過程中發生異常（例如資料庫連線失敗），<b>必須主動釋放已獲得的 Redis 鎖</b>。
+     *    否則，在接下來的 Retry Topic 重試輪詢中，重試訊息會因為撞到自己先前設下的鎖而被主動攔截，導致重試機制失效。
+     * 4. 釋放鎖後拋出異常，驅動 Spring Kafka 將訊息送入重試佇列進行指數退避等待。
+     * </p>
      *
+     * @param message 接收到的 Kafka 訊息 JSON 字串
+     * @param currentTopic 當前消費的主題名稱（可能為原主題或重試主題）
      */
     @RetryableTopic(
-        attempts = "3", // 總共嘗試 3 次（1次原始消費 + 2次非同步退避重試）
+        attempts = "3",
         topicSuffixingStrategy = TopicSuffixingStrategy.SUFFIX_WITH_INDEX_VALUE,
         dltStrategy = DltStrategy.FAIL_ON_ERROR,
         include = { RuntimeException.class }
@@ -49,13 +82,13 @@ public class OrderQueryConsumer {
             OrderCreatedEvent event = objectMapper.readValue(message, OrderCreatedEvent.class);
             String orderId = event.getOrderId();
 
-            // 如果包含特定測試商品 ID，人工引爆異常
+            // 測試機制：如果商品 ID 等於 "PROD-DLQ-TEST"，人為模擬資料庫超時異常以測試死信佇列
             if ("PROD-DLQ-TEST".equals(event.getProductId())) {
                 log.error("[觸發預期異常] 偵測到死信測試專用商品！模擬數據庫此時連線超時！Topic: {}", currentTopic);
                 throw new RuntimeException("DB_CONNECTION_TIMEOUT_SIMULATION");
             }
 
-            // 分散式冪等性鎖防止重複消費
+            // 設置 Redis 去重鎖
             lockKey = "order:lock:consume:" + orderId;
             Boolean isFirstConsume = redisTemplate.opsForValue().setIfAbsent(lockKey, "LOCKED", 10, TimeUnit.MINUTES);
 
@@ -66,24 +99,31 @@ public class OrderQueryConsumer {
 
             log.info("【Query 端】成功獲取消費鎖，開始從 Topic [{}] 消費訊息: {}", currentTopic, message);
 
-            // 呼叫 Service 更新 Redis 唯讀長效視圖 (order:view:)
+            // 呼叫 Service 同步更新 Redis 中的唯讀訂單長效視圖
             orderQueryService.syncOrderView(event);
 
         } catch (Exception e) {
-            // 如果是真正的業務失敗觸發了 Exception
-            // 必須主動把 Redis 鎖刪除，否則下一次重試通道 (Retry Topic) 進來時會因為被鎖住而無法執行
+            // 異常補償：釋放 Redis 去重鎖，以利下一輪重試非同步執行
             if (lockKey != null) {
                 redisTemplate.delete(lockKey);
                 log.info("[重試優化] 已主動釋放 Redis 消費鎖 {}，以利下一輪非同步退避重試執行。", lockKey);
             }
 
-            // 重新拋出異常，告訴 Spring Kafka 驅動「這筆失敗了，請幫我送進重試佇列」
+            // 重新拋出異常以觸發 Spring Kafka Retry 主題重試
             throw new RuntimeException(e);
         }
     }
 
     /**
-     * 死信佇列攔截器 (Dead Letter Topic Handler)
+     * 死信佇列處理器 (Dead Letter Topic Handler)。
+     * <p>
+     * 當重試次數（3 次）全部用盡且依然拋出異常時，訊息將會被送入 DLT 佇列。
+     * 本方法負責攔截這些「毒丸訊息」，並執行對應的壞帳登記或警報通知。
+     * </p>
+     *
+     * @param message 原始毒丸訊息的 JSON 字串
+     * @param dltTopic 觸發此處理的死信佇列主題名稱
+     * @param exceptionMessage 底層核心異常崩潰的錯誤描述
      */
     @DltHandler
     public void handleDeadLetter(

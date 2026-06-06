@@ -1,77 +1,80 @@
 server:
-  port: 8081 # 設定 Spring Boot 埠口為 8081
+  port: 8081 # 設定 Spring Boot 應用程式的埠口為 8081
 
 spring:
   application:
     name: kafka-cqrs-demo
 
-  # ==========================================
-  # 1. 資料庫連線 (Datasource Configuration)
-  # ==========================================
+  # =========================================================================
+  # 1. 關聯式資料庫連線配置 (MySQL Datasource Configuration)
+  # =========================================================================
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/my_database?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
     username: root
     password: password
 
+    # HikariCP 連線池效能調優配置
     hikari:
-      maximum-pool-size: 10
-      minimum-idle: 5
-      idle-timeout: 30000
-      connection-timeout: 20000
+      maximum-pool-size: 10   # 連線池最大活動連線數限制為 10
+      minimum-idle: 5         # 連線池維持的最小空閒連線數為 5
+      idle-timeout: 30000     # 連線最大空閒存活時間為 30 秒，超過將被釋放
+      connection-timeout: 20000 # 取得資料庫連線的等待超時時間上限為 20 秒
 
-  # ==========================================
-  # 2. JPA & Hibernate 設定
-  # ==========================================
+  # =========================================================================
+  # 2. JPA 與 Hibernate 實體管理配置 (JPA & Hibernate Configuration)
+  # =========================================================================
   jpa:
     database-platform: org.hibernate.dialect.MySQLDialect
     hibernate:
-      ddl-auto: update
-    show-sql: true
+      ddl-auto: update        # 啟動時自動檢查並根據實體結構更新資料庫 schema
+    show-sql: true            # 在控制台列印 Hibernate 實際執行的 SQL 語句
     properties:
       hibernate:
-        format_sql: true
+        format_sql: true      # 格式化輸出 SQL，以提高排版可讀性
 
-  # ==========================================
-  # 3. Kafka 分散式佇列與重試機制設定
-  # ==========================================
+  # =========================================================================
+  # 3. Kafka 分散式佇列與訊息重試機制配置 (Kafka Configuration)
+  # =========================================================================
   kafka:
     bootstrap-servers: localhost:9092
     listener:
-      observation-enabled: true # 點亮 Kafka 消費端的全自動觀測攔截
+      observation-enabled: true # 啟用 Spring Kafka 的全自動鏈路觀測與監控攔截
 
-    # 讀取端 Consumer 設定
+    # 讀取端消費者配置 (Consumer Settings)
     consumer:
       group-id: my-cqrs-group
-      auto-offset-reset: earliest
+      auto-offset-reset: earliest # 當沒有初始偏移量或偏移量失效時，從分割區最開頭開始消費
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 
-    # 寫入端 Producer 設定
+    # 寫入端生產者配置 (Producer Settings)
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
-      ack: all
-      retries: 3
+      ack: all                 # 要求所有副本皆確認收到訊息，確保數據不丟失
+      retries: 3               # 發生網路瞬斷時，生產端驅動自動嘗試重送的次數上限為 3 次
       properties:
-        enable.idempotence: true
-        "max.in.flight.requests.per.connection": 5
+        enable.idempotence: true # 啟用生產端等冪性，防範因重複發送導致的訊息重複問題
+        "max.in.flight.requests.per.connection": 5 # 限制每個連線在未收到 ACK 前的最大請求數，確保訊息順序性
 
-    # 重試機制獨立在 kafka 底下，與 producer/consumer 平級
+    # 傳統模式非同步重試機制配置（與 producer/consumer 同級）
     retry:
       topic:
         backoff:
-          delay: 2000         # 初始延遲 2 秒
-          multiplier: 2.0     # 退避倍率 2 倍
+          delay: 2000         # 第一次非同步重試的初始退避延遲時間為 2 秒 (2000 毫秒)
+          multiplier: 2.0     # 退避乘數設定為 2 倍，代表後續的重試延遲時間會成倍增長
+
+# =========================================================================
+# 4. Axon Framework 分散式系統與事件溯源配置 (Axon Configuration)
+# =========================================================================
 axon:
   axonserver:
-    # 💡 強制指定連線位址與 Context
-    servers: localhost:8124
-    context: default
-    # 💡 增加這兩行設定，這在處理 gRPC 握手失敗時特別有效
-    connect-timeout: 60000
-    keep-alive-time: 60000
+    servers: localhost:8124  # 強制指定 Axon Server 的主機連線位址與埠口
+    context: default         # 配置當前應用的 Axon 註冊上下文 (Context) 名稱為 default
+    connect-timeout: 60000   # 與 Axon Server 建立 gRPC 連線的握手等待超時時間設定為 60 秒 (60000 毫秒)
+    keep-alive-time: 60000   # gRPC 連線的心跳維持週期設定為 60 秒，能有效解決連線長時間閒置被防火牆中斷的問題
   serializer:
-    general: xstream
-    events: xstream
-    messages: xstream
+    general: xstream         # 全域預設使用的序列化工具指定為 XStream
+    events: xstream          # 事件儲存序列化工具指定為 XStream
+    messages: xstream        # 系統指令與查詢訊息序列化工具指定為 XStream

@@ -20,6 +20,13 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * 生產端與消費端等冪性壓測模擬控制器 (Producer Test Controller)
+ * <p>
+ * 本控制器專門用於手動觸發 Kafka 訊息傳輸中各種極端併發與異常情境的壓測 API。
+ * 它模擬了生產端等冪性在超高併發下的行為、消費端 Redis 分散式鎖防禦機制，以及突發性網路中斷時的自動重試機制。
+ * </p>
+ */
 @RestController
 @RequestMapping("/api/test")
 @Slf4j
@@ -32,26 +39,30 @@ public class ProducerTestController {
     private ObjectMapper objectMapper;
 
     /**
-     * 🧪 驗證「生產端等冪性 (Kafka De-duplication)」的超高併發完全體壓測 API
+     * 驗證「生產端等冪性 (Kafka De-duplication)」的超高併發壓測 API。
      * <p>
-     * 💡 【硬核壓測原理與底層行為分析】：
-     * 本方法利用 {@link CountDownLatch} 作為發令槍，強迫 4 個執行緒在「同一主機微秒」內並行衝出，
-     * 同時呼叫 {@code kafkaTemplate.send()} 發送相同 Key (mockOrderId) 的訊息。
+     * 壓測原理與底層行為分析：
+     * 本方法利用 CountDownLatch 作為發令槍，強迫 4 個執行緒在同一微秒內並行發送相同 Key (mockOrderId) 的訊息。
+     * </p>
      * <p>
-     * ❓ 【為什麼此處生產端的 enable.idempotence=true 會看似「失效」？】
-     * 1. <b>記憶體批次機制 (RecordAccumulator)：</b> Kafka Producer 收到發送請求時，並非立刻走網路 I/O，
-     * 而是將訊息先放入記憶體緩衝區，並根據 Partition 進行打包 (Batching)。
-     * 2. <b>連續序列號編配：</b> 因為 4 個執行緒是同時並行將 4 個獨立的記憶體物件砸進 Kafka 驅動，
-     * Producer 驅動會認定這是業務層面「故意連續發送的 4 筆不同訊息」，因此在記憶體中依序為它們
-     * 編配了「連續且遞增」的 Sequence Number (例如: Seq 1, 2, 3, 4)。
-     * 3. <b>Broker 端判定：</b> Kafka Broker 收到該批次 (Batch) 後，發現 Sequence Number 完全連續且無重複，
-     * 判定為正常的連續生產，而非網路抖動導致的重試，因此網開一面讓 4 筆訊息全部入佇列。
+     * 為什麼此處生產端的 enable.idempotence=true 會看似失效？
+     * 1. 記憶體批次機制 (RecordAccumulator)：Kafka Producer 收到發送請求時，並非立刻走網路 I/O，
+     *    而是將訊息先放入記憶體緩衝區，並根據 Partition 進行打包。
+     * 2. 連續序列號編配：因為 4 個執行緒是同時並行將 4 個獨立的記憶體物件砸進 Kafka 驅動，
+     *    Producer 驅動會認定這是業務連續發送的 4 筆不同訊息，因此在記憶體中依序為它們
+     *    編配了連續且遞增的 Sequence Number。
+     * 3. Broker 端判定：Kafka Broker 收到該批次後，發現 Sequence Number 連續無重複，
+     *    判定為正常的連續生產，因此 4 筆訊息全部入佇列。
+     * </p>
      * <p>
-     * 🎯 【架構含金量 (面試核心論點)】：
-     * 本測試完美證明了<b>「禦敵於國門之外（生產端等冪性）」在大併發場景下的局限性</b>。當重複流量在同一個
-     * 微秒內並行發生時，訊息必定會穿透 Kafka 佇列砸向消費端。
-     * 此時，專案設計的<b>「第二道防線：消費端 Redis 分散式鎖 (setIfAbsent)」</b>便發揮了強大的最終兜底效益，
-     * 第一筆訊息成功搶鎖更新視圖，其餘 3 筆訊息在 3 毫秒內撞鎖攔截，噴出 WARN 警告，完美守住最終一致性。
+     * 架構設計價值：
+     * 本測試證明了生產端等冪性在大併發重複發送場景下的局限性。當重複流量在同一個微秒內並行發生時，
+     * 訊息必定會穿透 Kafka 佇列砸向消費端。此時，消費端的 Redis 分散式鎖 (setIfAbsent)
+     * 即為守住資料最終一致性的核心防線。
+     * </p>
+     *
+     * @param request 訂單建立請求資料
+     * @return 測試觸發回應 ResponseEntity
      */
     @PostMapping("/produce-duplicate")
     public ResponseEntity<String> simulateDuplicateProduction(@RequestBody CreateOrderRequest request) {
@@ -64,19 +75,19 @@ public class ProducerTestController {
             );
             String jsonEvent = objectMapper.writeValueAsString(event);
 
-            // 🏁 發令槍：計數為 1
+            // 發令槍：計數為 1
             java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
 
-            log.info("🚀 [生產端等冪性大壓測] 啟動！4 個並行執行緒已進起跑線，準備夾擊 Kafka... ID: {}", mockOrderId);
+            log.info("[生產端等冪性大壓測] 啟動！4 個並行執行緒已進起跑線，準備夾擊 Kafka... ID: {}", mockOrderId);
 
             // 瞬間丟 4 個任務進執行緒池，它們全都會卡在 latch.await()
             for (int i = 0; i < 4; i++) {
                 final int threadNum = i + 1;
                 executorService.submit(() -> {
                     try {
-                        latch.await(); // 憋在起跑線
+                        latch.await(); // 在起跑線等待發令
                         kafkaTemplate.send(KafkaTopicConfig.TOPIC_NAME, mockOrderId, jsonEvent);
-                        log.info("⚡ [生產端執行緒 {}] 訊息已成功射出！", threadNum);
+                        log.info("[生產端執行緒 {}] 訊息已成功射出！", threadNum);
                     } catch (Exception e) {
                         log.error("生產端執行緒 {} 發送失敗", threadNum, e);
                     }
@@ -86,9 +97,9 @@ public class ProducerTestController {
             // 稍微睡 50 毫秒，確保 4 個執行緒都已經在 latch.await() 阻塞就位
             Thread.sleep(50);
 
-            // 🔫 鳴槍起跑！
+            // 鳴槍起跑！
             latch.countDown();
-            log.info("🔥 [發令槍響] 4 個執行緒在同一個微秒內並行衝出，呼叫 KafkaTemplate！");
+            log.info("[發令槍響] 4 個執行緒在同一個微秒內並行衝出，呼叫 KafkaTemplate！");
 
             // 優雅關閉執行緒池並等待所有發送任務結束
             executorService.shutdown();
@@ -105,14 +116,15 @@ public class ProducerTestController {
     }
 
     /**
-     * 🛡️ API 2：專門驗證「消費端分散式鎖 (Redis SETNX 最終一體性)」
-     * 流程：故意等待 1 秒分開送，或者由不同執行緒發送，藉此繞過 Kafka 生產端的 Sequence 去重。
-     * 預期：Kafka 队列裡會確實存在 2 筆訊息。Consumer 收到第一筆時上鎖，第二筆直接撞牆，噴出「主動攔截」的 WARN Log。
-     */
-    /**
-     * 🛡️ API 2：專門驗證「消費端高併發分散式鎖 (Redis SETNX)」
-     * 流程：利用 CountDownLatch 讓多個執行緒在同一微秒「同時起跑」發送相同事件，強行穿透生產端防禦。
-     * 預期：Kafka 佇列裡會確實存在 2 筆訊息。Consumer 端的兩個執行緒會同時觸發，但只有一個能拿到 Redis 鎖。
+     * 驗證「消費端高併發分散式鎖 (Redis SETNX)」防禦機制的測試 API。
+     * <p>
+     * 流程：利用 CountDownLatch 讓兩個執行緒在同一微秒同時起跑發送相同事件，強行穿透生產端防禦。
+     * 預期：Kafka 佇列裡會確實存在 2 筆訊息。Consumer 端的兩個執行緒會同時觸發消費，
+     * 但由於 Redis 分散式鎖的互斥性，只有一個執行緒能搶鎖成功並執行邏輯，另一筆則被攔截拒絕。
+     * </p>
+     *
+     * @param request 訂單建立請求資料
+     * @return 測試觸發回應 ResponseEntity
      */
     @PostMapping("/consume-duplicate")
     public ResponseEntity<String> testConsumerIdempotence(@RequestBody CreateOrderRequest request) {
@@ -123,11 +135,10 @@ public class ProducerTestController {
             );
             String jsonEvent = objectMapper.writeValueAsString(event);
 
-            // 🏁 核心黑科技：併發倒數閘門（計數為 1）
-            // 它的作用就像賽跑時的「發令槍」，閘門沒開之前，所有執行緒都必須在起跑線憋著
+            // 併發倒數閘門（計數為 1），模擬賽跑時的發令槍
             java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
 
-            log.info("🚀 [消費端高併發防禦測試] 準備發動！初始化 2 個執行緒進入起跑線... ID: {}", mockOrderId);
+            log.info("[消費端高併發防禦測試] 準備發動！初始化 2 個執行緒進入起跑線... ID: {}", mockOrderId);
 
             // 執行緒 A：負責發送第一筆
             java.util.concurrent.CompletableFuture<Void> task1 = java.util.concurrent.CompletableFuture.runAsync(() -> {
@@ -149,15 +160,14 @@ public class ProducerTestController {
                 }
             });
 
-            // 🔥 兩台跑車都就位了，手動延遲 50 毫秒確保執行緒都已經進到 latch.await() 阻塞狀態
+            // 延遲 50 毫秒確保兩個非同步任務執行緒皆已進入 latch.await() 阻塞狀態
             Thread.sleep(50);
 
-            // 🔫 鳴槍起跑！倒數減為 0，兩個執行緒會在「同一主機微秒內」同時並行發送 Kafka
-            // 由於是由不同的執行緒（Thread）在不同的 CPU 核心上發出，這會完美穿透 Kafka 相同生產者的 Sequence 限制
+            // 鳴槍起跑！兩個執行緒同時將訊息發送到 Kafka
             latch.countDown();
-            log.info("⚡ [發令槍響] 2 個執行緒已瞬間同時對 Kafka 進行超高併發夾擊轟炸！");
+            log.info("[發令槍響] 2 個執行緒已瞬間同時對 Kafka 進行超高併發發送！");
 
-            // 等待兩個非同步任務都發送完成
+            // 等待兩個發送任務完成
             java.util.concurrent.CompletableFuture.allOf(task1, task2).join();
 
             return ResponseEntity.ok("【高併發消費測試送出】請快去 Console 驗證高併發肉搏攔截 Log！ID: " + mockOrderId);
@@ -166,6 +176,18 @@ public class ProducerTestController {
         }
     }
 
+    /**
+     * 模擬生產端在遇到網路異常時觸發重試的測試 API。
+     * <p>
+     * 流程：
+     * 1. 透過匿名內部類別包裝內建計數器狀態機，代理原本的 KafkaTemplate。
+     * 2. 第一次呼叫 send 時故意拋出 TimeoutException，模擬突發性網路中斷。
+     * 3. 業務層面捕捉到超時後，觸發第二次重試補償（成功送出）。
+     * </p>
+     *
+     * @param request 訂單建立請求資料
+     * @return 測試觸發回應 ResponseEntity
+     */
     @PostMapping("/retry-simulation")
     public ResponseEntity<String> simulateProducerRetry(@RequestBody CreateOrderRequest request) {
         try {
@@ -175,9 +197,9 @@ public class ProducerTestController {
             );
             String jsonEvent = objectMapper.writeValueAsString(event);
 
-            log.info("🚀 [自動化重試測試] 啟動！利用純 Java 匿名物件模擬網路中斷... ID: {}", mockOrderId);
+            log.info("[自動化重試測試] 啟動！利用純 Java 匿名物件模擬網路中斷... ID: {}", mockOrderId);
 
-            // 1. 核心黑科技：利用匿名內部類別覆寫 send 方法，內建計數器狀態機
+            // 利用匿名內部類別覆寫 send 方法，內建計數器狀態機
             KafkaTemplate<String, String> spyKafkaTemplate =
                 new org.springframework.kafka.core.KafkaTemplate<String, String>(kafkaTemplate.getProducerFactory()) {
 
@@ -190,25 +212,25 @@ public class ProducerTestController {
 
                         int currentCall = callCount.incrementAndGet();
                         if (currentCall == 1) {
-                            // 📡 第一次呼叫：故意拋出 Kafka 原生超時異常，模擬突發性網路中斷
+                            // 第一次呼叫：故意拋出 Kafka 原生超時異常，模擬突發性網路中斷
                             throw new TimeoutException(
                                 "【模擬突發性網路中斷】1000 ms has passed since batch creation plus linger time."
                             );
                         }
-                        // 🔄 第二次及之後的呼叫：完美放行，呼叫原本真實的 KafkaTemplate 發送
+                        // 第二次及之後的呼叫：正常放行，呼叫原本真實的 KafkaTemplate 發送
                         return kafkaTemplate.send(topic, key, data);
                     }
                 };
 
-            // 2. 發動第一次發送（這筆在內部會直接觸發 currentCall == 1，噴出 Timeout 異常）
+            // 發動第一次發送，這筆會觸發 Timeout 異常
             try {
-                log.info("📡 [第一次發送嘗試] 故意製造網路抖動...");
+                log.info("[第一次發送嘗試] 故意製造網路抖動...");
                 spyKafkaTemplate.send(KafkaTopicConfig.TOPIC_NAME, mockOrderId, jsonEvent);
             } catch (Exception e) {
-                log.warn("⚠️ [生產端攔截預期異常] 第一次發送確實超時失敗了！錯誤訊息: {}", e.getMessage());
+                log.warn("[生產端攔截預期異常] 第一次發送確實超時失敗了！錯誤訊息: {}", e.getMessage());
 
-                // 3. 🚀 【核心重試模擬】：當業務層面捕捉到超時後，發動第二次重試補償（觸發 currentCall == 2，成功射出）
-                log.info("🔄 [啟動生產端自動補償機制] 正在發動第二次等冪性重試發送... ID: {}", mockOrderId);
+                // 補償機制：當業務層捕捉到超時後，發動第二次等冪性重試發送
+                log.info("[啟動生產端自動補償機制] 正在發動第二次等冪性重試發送... ID: {}", mockOrderId);
                 spyKafkaTemplate.send(KafkaTopicConfig.TOPIC_NAME, mockOrderId, jsonEvent);
             }
 

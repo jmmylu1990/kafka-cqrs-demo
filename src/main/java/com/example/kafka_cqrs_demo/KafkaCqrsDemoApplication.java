@@ -4,12 +4,24 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.ComponentScan;
 
+/**
+ * Spring Boot 應用程式入口點 (Spring Boot Entry Point)
+ * <p>
+ * 啟動本 CQRS 與 Axon Saga 範例專案。
+ * 本類別藉由標註 {@link SpringBootApplication} 與 {@link ComponentScan}，
+ * 自動配置 Spring 應用程式環境、掃描並載入專案下所有的 Bean、控制器、服務及 Axon 配置。
+ * </p>
+ */
 @SpringBootApplication
 @ComponentScan(basePackages = "com.example.kafka_cqrs_demo")
 public class KafkaCqrsDemoApplication {
 
-	public static void main(String[] args) {
-		SpringApplication.run(KafkaCqrsDemoApplication.class, args);
-	}
-
+    /**
+     * Java 應用程式主進入點。
+     *
+     * @param args 外部傳入的命令列參數
+     */
+    public static void main(String[] args) {
+        SpringApplication.run(KafkaCqrsDemoApplication.class, args);
+    }
 }
