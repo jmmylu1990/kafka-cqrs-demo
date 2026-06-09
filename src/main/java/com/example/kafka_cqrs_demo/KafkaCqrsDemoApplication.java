@@ -5,6 +5,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.context.annotation.ComponentScan;
 
+import org.springframework.scheduling.annotation.EnableScheduling;
+
 /**
  * Spring Boot 應用程式入口點 (Spring Boot Entry Point)
  * <p>
@@ -14,6 +16,7 @@ import org.springframework.context.annotation.ComponentScan;
  * </p>
  */
 @SpringBootApplication
+@EnableScheduling
 @ComponentScan(basePackages = "com.example.kafka_cqrs_demo")
 @EntityScan(basePackages = {
         "com.example.kafka_cqrs_demo",

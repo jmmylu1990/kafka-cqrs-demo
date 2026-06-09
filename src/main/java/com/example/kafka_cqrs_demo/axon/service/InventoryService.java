@@ -123,6 +123,11 @@ public class InventoryService {
                 orderResMap.put("productId", productId);
                 orderResMap.put("quantity", String.valueOf(qty));
                 orderResMap.put("status", "RESERVED");
+                orderResMap.put("updatedAt", String.valueOf(System.currentTimeMillis()));
+
+                // 更新商品可用庫存修改時間
+                redissonClient.getBucket("product:" + productId + ":updatedAt", StringCodec.INSTANCE)
+                        .set(String.valueOf(System.currentTimeMillis()));
 
                 log.info("[InventoryService] Redisson 庫存預留成功，扣除產品 {} 可用庫存 {} 件，轉為預留狀態",
                         productId, qty);
@@ -216,6 +221,11 @@ public class InventoryService {
 
                     // 2. 更新狀態
                     orderResMap.put("status", "COMPLETED");
+                    orderResMap.put("updatedAt", String.valueOf(System.currentTimeMillis()));
+
+                    // 更新商品預留庫存修改時間
+                    redissonClient.getBucket("product:" + productId + ":updatedAt", StringCodec.INSTANCE)
+                            .set(String.valueOf(System.currentTimeMillis()));
 
                     log.info("[InventoryService] Redisson 預留庫存扣減成功 (COMMIT): orderId={}", orderId);
 
@@ -293,6 +303,11 @@ public class InventoryService {
                     reservedBucket.set(String.valueOf(Math.max(0, currentReserved - qty)));
 
                     orderResMap.put("status", "RELEASED");
+                    orderResMap.put("updatedAt", String.valueOf(System.currentTimeMillis()));
+
+                    // 更新商品庫存修改時間
+                    redissonClient.getBucket("product:" + productId + ":updatedAt", StringCodec.INSTANCE)
+                            .set(String.valueOf(System.currentTimeMillis()));
                     log.info("[InventoryService] Redisson 庫存釋放成功 (RELEASE): orderId={}", orderId);
 
                     // 2. 發送 Kafka 同步訊息至 MySQL
@@ -304,6 +319,11 @@ public class InventoryService {
                     stockBucket.set(String.valueOf(currentStock + qty));
 
                     orderResMap.put("status", "REFUNDED");
+                    orderResMap.put("updatedAt", String.valueOf(System.currentTimeMillis()));
+
+                    // 更新商品庫存修改時間
+                    redissonClient.getBucket("product:" + productId + ":updatedAt", StringCodec.INSTANCE)
+                            .set(String.valueOf(System.currentTimeMillis()));
                     log.info("[InventoryService] Redisson 已付款庫存釋放成功 (REFUND): orderId={}", orderId);
 
                     // 4. 發送 Kafka 同步訊息至 MySQL
