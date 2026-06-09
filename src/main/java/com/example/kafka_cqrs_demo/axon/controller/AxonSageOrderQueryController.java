@@ -1,5 +1,8 @@
 package com.example.kafka_cqrs_demo.axon.controller;
 
+import com.example.kafka_cqrs_demo.axon.repository.AxonOrderRepository;
+import com.example.kafka_cqrs_demo.entity.AxonOrderEntity;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -7,7 +10,9 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 訂單查詢端 API 控制器 (Order Query Controller)
@@ -23,23 +28,25 @@ import java.util.Set;
 @RequestMapping("/axonsaga/api/orders")
 public class AxonSageOrderQueryController {
 
-    /** 用於讀取快取資料的 Redis Template */
     private final StringRedisTemplate redisTemplate;
+    private final AxonOrderRepository orderRepository;
+    private final ObjectMapper objectMapper;
 
     /**
      * 查詢控制器的建構子。
-     *
-     * @param redisTemplate Spring Boot 自動配置的 StringRedisTemplate 實例
      */
-    public AxonSageOrderQueryController(StringRedisTemplate redisTemplate) {
+    public AxonSageOrderQueryController(StringRedisTemplate redisTemplate,
+                                         AxonOrderRepository orderRepository,
+                                         ObjectMapper objectMapper) {
         this.redisTemplate = redisTemplate;
+        this.orderRepository = orderRepository;
+        this.objectMapper = objectMapper;
     }
 
     /**
      * 根據訂單唯一識別碼查詢訂單詳情。
      * <p>
-     * 流程：前端請求 -> 控制器查詢 Redis 中的特定 Key -> 返回 JSON 字串。
-     * 由於資料已被 Projector 預先轉換為最適合查詢的扁平結構，此處無須進行複雜的 SQL Join 或事件重放，速度極快。
+     * 流程：前端請求 -> 控制器查詢 Redis 中的特定 Key -> 若未命中則從 MySQL 載入並快取回 Redis (TTL 1 天)。
      * </p>
      *
      * @param orderId 訂單唯一識別碼 (UUID)
@@ -49,12 +56,32 @@ public class AxonSageOrderQueryController {
     public String getOrder(@PathVariable String orderId) {
         log.info("查詢訂單請求，ID: {}", orderId);
 
-        // 從 Redis 取得由 OrderViewProjector 同步維護的 JSON 資訊
-        String orderJson = redisTemplate.opsForValue().get("order:" + orderId);
+        String key = "order:" + orderId;
+        // 1. 先從 Redis 取得
+        String orderJson = redisTemplate.opsForValue().get(key);
 
         if (orderJson == null) {
-            log.warn("訂單不存在，ID: {}", orderId);
-            return "訂單不存在";
+            log.info("Redis 快取未命中 (Cache Miss)，嘗試從 MySQL 查詢: {}", orderId);
+            Optional<AxonOrderEntity> orderOpt = orderRepository.findById(orderId);
+            if (orderOpt.isPresent()) {
+                try {
+                    AxonOrderEntity order = orderOpt.get();
+                    orderJson = objectMapper.writeValueAsString(order);
+                    // 2. 回寫 Redis，設定 TTL 為 1 天
+                    redisTemplate.opsForValue().set(key, orderJson, 1, TimeUnit.DAYS);
+                    log.info("從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 1 天): {}", orderId);
+                } catch (Exception e) {
+                    log.error("序列化訂單或寫入 Redis 失敗: {}", e.getMessage(), e);
+                    try {
+                        return objectMapper.writeValueAsString(orderOpt.get());
+                    } catch (Exception ex) {
+                        return "查詢出錯";
+                    }
+                }
+            } else {
+                log.warn("訂單不存在，ID: {}", orderId);
+                return "訂單不存在";
+            }
         }
 
         log.info("查詢成功，返回訂單資料");

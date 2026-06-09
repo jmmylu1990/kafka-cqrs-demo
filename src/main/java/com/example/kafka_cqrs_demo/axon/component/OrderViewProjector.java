@@ -18,6 +18,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 訂單投影器 (Order View Projector)
@@ -74,15 +75,16 @@ public class OrderViewProjector {
             log.error("[Projection] 同步至 MySQL 失敗: {}", e.getMessage(), e);
         }
 
-        // 2. 同步至 Redis 快取
+        // 2. 同步至 Redis 快取 (設定 1 天過期 TTL)
         try {
             ObjectNode node = objectMapper.valueToTree(event);
             node.put("status", OrderStatus.CREATED.name());
 
-            redisTemplate.opsForValue().set("order:" + event.getOrderId(), node.toString());
+            String key = "order:" + event.getOrderId();
+            redisTemplate.opsForValue().set(key, node.toString(), 1, TimeUnit.DAYS);
             redisTemplate.opsForSet().add("orders:all", event.getOrderId());
 
-            log.info("[Projection] Redis 訂單 {} 寫入成功", event.getOrderId());
+            log.info("[Projection] Redis 訂單 {} 寫入成功 (TTL 1 天)", event.getOrderId());
         } catch (Exception e) {
             log.error("[Projection] 同步至 Redis 失敗: {}", e.getMessage(), e);
         }
@@ -90,38 +92,38 @@ public class OrderViewProjector {
 
     /**
      * 當訂單確認付款時的事件處理器。
-     * 更新 MySQL 與 Redis 中的狀態。
+     * 更新 MySQL 並失效 Redis 快取。
      */
     @EventHandler
     @Transactional
     public void on(OrderPaidEvent event) {
-        log.info("[Projection] 收到訂單付款成功事件，準備更新 Redis & MySQL: {}", event.getOrderId());
+        log.info("[Projection] 收到訂單付款成功事件，準備更新 MySQL 並失效 Redis 快取: {}", event.getOrderId());
         updateMySQLStatus(event.getOrderId(), OrderStatus.PAID, null);
-        updateOrderStatus(event.getOrderId(), OrderStatus.PAID, event.getReason());
+        evictRedisCache(event.getOrderId());
     }
 
     /**
      * 當訂單被取消時的事件處理器。
-     * 更新 MySQL 與 Redis 中的狀態。
+     * 更新 MySQL 並失效 Redis 快取。
      */
     @EventHandler
     @Transactional
     public void on(OrderCancelledEvent event) {
-        log.info("[Projection] 收到訂單取消事件，準備更新 Redis & MySQL: {}", event.getOrderId());
+        log.info("[Projection] 收到訂單取消事件，準備更新 MySQL 並失效 Redis 快取: {}", event.getOrderId());
         updateMySQLStatus(event.getOrderId(), OrderStatus.CANCELLED, event.getReason());
-        updateOrderStatus(event.getOrderId(), OrderStatus.CANCELLED, event.getReason());
+        evictRedisCache(event.getOrderId());
     }
 
     /**
      * 當訂單庫存成功扣減並確認預留時的事件處理器。
-     * 更新 MySQL 與 Redis 中的狀態。
+     * 更新 MySQL 並失效 Redis 快取。
      */
     @EventHandler
     @Transactional
     public void on(OrderStockReservedEvent event) {
-        log.info("[Projection] 庫存預留成功，更新 Redis & MySQL 狀態為 PENDING_PAYMENT: {}", event.getOrderId());
+        log.info("[Projection] 庫存預留成功，更新 MySQL 並失效 Redis 快取為 PENDING_PAYMENT: {}", event.getOrderId());
         updateMySQLStatus(event.getOrderId(), OrderStatus.PENDING_PAYMENT, null);
-        updateOrderStatus(event.getOrderId(), OrderStatus.PENDING_PAYMENT, "付款中");
+        evictRedisCache(event.getOrderId());
     }
 
     /**
@@ -147,30 +149,15 @@ public class OrderViewProjector {
     }
 
     /**
-     * 同步更新 Redis 中的訂單狀態。
+     * 失效/刪除 Redis 中的訂單快取，落實 Cache Eviction。
      */
-    private void updateOrderStatus(String orderId, OrderStatus status, String reason) {
-        String key = "order:" + orderId;
-        String json = redisTemplate.opsForValue().get(key);
-
-        if (json != null) {
-            try {
-                JsonNode rootNode = objectMapper.readTree(json);
-                ObjectNode objectNode = (ObjectNode) rootNode;
-
-                objectNode.put("status", status.name());
-
-                if (reason != null && !reason.isEmpty()) {
-                    objectNode.put("cancelReason", reason);
-                }
-
-                redisTemplate.opsForValue().set(key, rootNode.toString());
-                log.info("[Projection] Redis 訂單 {} 狀態成功更新為 {}", orderId, status);
-            } catch (Exception e) {
-                log.error("[Projection] Redis 訂單狀態更新失敗: ID {}, Error: {}", orderId, e.getMessage(), e);
-            }
-        } else {
-            log.warn("[Projection] Redis 未找到訂單 {}，無法更新狀態", orderId);
+    private void evictRedisCache(String orderId) {
+        try {
+            String key = "order:" + orderId;
+            redisTemplate.delete(key);
+            log.info("[Projection] Redis 訂單 {} 快取已刪除 (Evicted)", orderId);
+        } catch (Exception e) {
+            log.error("[Projection] 刪除 Redis 快取失敗: ID {}, Error: {}", orderId, e.getMessage(), e);
         }
     }
 }
