@@ -3,14 +3,19 @@ package com.example.kafka_cqrs_demo.axon.controller;
 import com.example.kafka_cqrs_demo.axon.command.AxonSagaCreateOrderCommand;
 import com.example.kafka_cqrs_demo.axon.command.CancelOrderCommand;
 import com.example.kafka_cqrs_demo.axon.command.ConfirmPaymentCommand;
+import com.example.kafka_cqrs_demo.axon.command.ProcessPaymentCommand;
 import com.example.kafka_cqrs_demo.axon.dto.CancelOrderRequest;
 import com.example.kafka_cqrs_demo.axon.dto.PayOrderRequest;
 import com.example.kafka_cqrs_demo.legacy.command.dto.CreateOrderRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.gateway.CommandGateway;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -36,8 +41,6 @@ public class AxonSageOrderCommandController {
 
     /**
      * 控制器的建構子。
-     *
-     * @param commandGateway 由 Spring Boot 自動注入的 Axon CommandGateway 實例
      */
     @Autowired
     public AxonSageOrderCommandController(CommandGateway commandGateway) {
@@ -58,13 +61,17 @@ public class AxonSageOrderCommandController {
     @PostMapping
     public CompletableFuture<String> createOrder(@RequestBody CreateOrderRequest request) {
         String orderId = UUID.randomUUID().toString();
+        String userId = request.getUserId() != null && !request.getUserId().isBlank()
+            ? request.getUserId()
+            : "USER-001";
 
         // 將 API 請求包裝為領域指令
         AxonSagaCreateOrderCommand command = new AxonSagaCreateOrderCommand(
             orderId,
             request.getProductId(),
             request.getQuantity(),
-            request.getPrice()
+            request.getPrice(),
+            userId
         );
 
         log.info("DEBUG - 指令類別路徑: {}" , command.getClass().getName());
@@ -91,9 +98,29 @@ public class AxonSageOrderCommandController {
      * @return 包含付款處理結果的 CompletableFuture 物件
      */
     @PostMapping("/pay")
-    public CompletableFuture<String> payOrder(@RequestBody PayOrderRequest request) {
-        log.info("接收到訂單付款請求，訂單 ID: {}", request.getOrderId());
-        return commandGateway.send(new ConfirmPaymentCommand(request.getOrderId()));
+    public ResponseEntity<Map<String, Object>> payOrder(@RequestBody PayOrderRequest request) {
+        String userId = request.getUserId() != null && !request.getUserId().isBlank()
+            ? request.getUserId()
+            : "USER-001";
+        log.info("接收到訂單付款請求，訂單 ID: {}, 使用者 ID: {}", request.getOrderId(), userId);
+        
+        // 1. 異步發送 Command，不阻塞等待背景 Saga/金流 API 處理
+        commandGateway.send(new ProcessPaymentCommand(request.getOrderId(), userId));
+        
+        // 2. 建立查詢狀態的 Location URL
+        String queryUrl = "http://localhost:8081/axonsaga/api/orders/" + request.getOrderId();
+        
+        // 3. 封裝 REST Response Body
+        Map<String, Object> responseBody = new HashMap<>();
+        responseBody.put("status", "PROCESSING");
+        responseBody.put("message", "付款扣款流程已啟動，請至 Location 標頭或 queryUrl 中的網址查詢最終結果");
+        responseBody.put("orderId", request.getOrderId());
+        responseBody.put("queryUrl", queryUrl);
+        
+        // 4. 回傳 HTTP 202 Accepted 與 Location 標頭
+        return ResponseEntity.accepted()
+                .header(HttpHeaders.LOCATION, queryUrl)
+                .body(responseBody);
     }
 
     /**

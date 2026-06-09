@@ -16,4 +16,7 @@ public class PayOrderRequest {
 
     /** 付款管道/方法，例如 CREDIT_CARD、LINE_PAY 等 */
     private String paymentMethod;
+
+    /** 欲付款的使用者唯一識別碼 */
+    private String userId;
 }

@@ -27,4 +27,7 @@ public class OrderCreatedEvent {
 
     /** 商品單價，單位為最小貨幣單位 */
     private long price;
+
+    /** 使用者唯一識別碼 */
+    private String userId;
 }

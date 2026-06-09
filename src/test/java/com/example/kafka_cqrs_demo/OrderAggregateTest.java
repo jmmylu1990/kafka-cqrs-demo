@@ -43,8 +43,22 @@ public class OrderAggregateTest {
     @Test
     void testCreateOrder() {
         fixture.givenNoPriorActivity()
-            .when(new AxonSagaCreateOrderCommand(orderId, "PRODUCT-001", 1, 1000))
-            .expectEvents(new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000));
+            .when(new AxonSagaCreateOrderCommand(orderId, "PRODUCT-001", 1, 1000, "USER-001"))
+            .expectEvents(new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000, "USER-001"));
+    }
+
+    /**
+     * 測試：在待付款狀態下，發送處理付款請求指令。
+     * 預期：聚合根應發布 PaymentStartedEvent 開始付款扣款。
+     */
+    @Test
+    void testProcessPaymentSuccess() {
+        fixture.given(
+                new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000, "USER-001"),
+                new OrderStockReservedEvent(orderId)
+            )
+            .when(new ProcessPaymentCommand(orderId, "USER-001"))
+            .expectEvents(new PaymentStartedEvent(orderId, "USER-001", 1000L));
     }
 
     /**
@@ -54,7 +68,7 @@ public class OrderAggregateTest {
     @Test
     void testPayOrderSuccess() {
         fixture.given(
-                new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000),
+                new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000, "USER-001"),
                 new OrderStockReservedEvent(orderId)
             )
             .when(new ConfirmPaymentCommand(orderId))
@@ -67,7 +81,7 @@ public class OrderAggregateTest {
      */
     @Test
     void testPayOrderInCreatedStatusShouldFail() {
-        fixture.given(new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000))
+        fixture.given(new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000, "USER-001"))
             .when(new ConfirmPaymentCommand(orderId))
             .expectException(IllegalStateException.class);
     }
@@ -78,7 +92,7 @@ public class OrderAggregateTest {
      */
     @Test
     void testConfirmStockReserved() {
-        fixture.given(new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000))
+        fixture.given(new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000, "USER-001"))
             .when(new ConfirmStockReservedCommand(orderId))
             .expectEvents(new OrderStockReservedEvent(orderId));
     }
@@ -89,7 +103,7 @@ public class OrderAggregateTest {
      */
     @Test
     void testCancelOrderSuccess() {
-        fixture.given(new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000))
+        fixture.given(new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000, "USER-001"))
             .when(new CancelOrderCommand(orderId, "不想要了"))
             .expectEvents(new OrderCancelledEvent(orderId, "不想要了"));
     }
@@ -101,7 +115,7 @@ public class OrderAggregateTest {
     @Test
     void testIllegalStateTransition() {
         fixture.given(
-                new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000),
+                new OrderCreatedEvent(orderId, "PRODUCT-001", 1, 1000, "USER-001"),
                 new OrderCancelledEvent(orderId, "取消原因")
             )
             .when(new ConfirmPaymentCommand(orderId))

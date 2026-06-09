@@ -4,11 +4,13 @@ import com.example.kafka_cqrs_demo.axon.command.AxonSagaCreateOrderCommand;
 import com.example.kafka_cqrs_demo.axon.command.CancelOrderCommand;
 import com.example.kafka_cqrs_demo.axon.command.ConfirmPaymentCommand;
 import com.example.kafka_cqrs_demo.axon.command.ConfirmStockReservedCommand;
+import com.example.kafka_cqrs_demo.axon.command.ProcessPaymentCommand;
 import com.example.kafka_cqrs_demo.axon.enums.OrderStatus;
 import com.example.kafka_cqrs_demo.axon.event.OrderCancelledEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderCreatedEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderPaidEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderStockReservedEvent;
+import com.example.kafka_cqrs_demo.axon.event.PaymentStartedEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.CommandHandler;
 import org.axonframework.eventsourcing.EventSourcingHandler;
@@ -49,11 +51,13 @@ public class AxonSagaOrderAggregate {
     /** 訂單取消或變更的詳細原因說明 */
     private String reason;
 
-    /**
-     * 訂單目前的生命週期狀態。
+    /** 訂單目前的生命週期狀態。
      * 狀態的變更僅能在 EventSourcingHandler 中進行賦值，以保證事件重放時的一致性。
      */
     private OrderStatus status;
+
+    /** 使用者唯一識別碼 */
+    private String userId;
 
     /**
      * 無參數建構子 (No-Args Constructor)。
@@ -83,8 +87,28 @@ public class AxonSagaOrderAggregate {
             command.getOrderId(),
             command.getProductId(),
             command.getQuantity(),
-            command.getPrice()
+            command.getPrice(),
+            command.getUserId()
         ));
+    }
+
+    /**
+     * 處理付款請求指令。
+     * 當使用者發起付款時觸發，校驗狀態後發布付款開始事件，由 Saga 協調錢包扣款。
+     */
+    @CommandHandler
+    public void handle(ProcessPaymentCommand command) {
+        log.info("處理付款請求指令: {}, 請求付款人: {}, 訂單所有人: {}", 
+                command.getOrderId(), command.getUserId(), this.userId);
+
+        if (this.status != OrderStatus.PENDING_PAYMENT) {
+            log.error("付款失敗：訂單 {} 當前狀態 {} 不允許付款", this.orderId, this.status);
+            throw new IllegalStateException("訂單目前狀態不允許付款: " + this.status);
+        }
+
+        long totalAmount = this.price * this.quantity;
+        // 確保扣款對象永遠是訂單的擁有者 (this.userId)
+        apply(new PaymentStartedEvent(this.orderId, this.userId, totalAmount));
     }
 
     /**
@@ -96,18 +120,18 @@ public class AxonSagaOrderAggregate {
      * 2. 若訂單狀態不為 PENDING_PAYMENT，表示該訂單尚未預扣庫存，或是處於已付款、已取消等狀態。
      * 3. 若狀態檢查不通過，將會拋出例外以拒絕此付款指令，防止重複付款或無效付款。
      *
-     * @param command 包含付款確認資訊的指令
+     * @param command 包含付款確認資訊 of the instruction
      * @throws IllegalStateException 當訂單狀態不符合付款條件時拋出
      */
     @CommandHandler
     public void handle(ConfirmPaymentCommand command) {
-        log.info("處理付款指令: {}", command.getOrderId());
+        log.info("處理付款確認指令: {}", command.getOrderId());
 
         // 防禦性檢查：驗證訂單是否處於可付款的狀態（必須是庫存已預留的待付款狀態）
         boolean isEligibleForPayment = (this.status == OrderStatus.PENDING_PAYMENT);
 
         if (!isEligibleForPayment) {
-            log.error("付款失敗：訂單 {} 當前狀態 {} 不允許執行付款", this.orderId, this.status);
+            log.error("付款失敗：訂單 {} 當前狀態 {} 不允許執行付款確認", this.orderId, this.status);
             throw new IllegalStateException("訂單目前狀態不允許付款: " + this.status);
         }
 
@@ -173,6 +197,7 @@ public class AxonSagaOrderAggregate {
         this.productId = event.getProductId();
         this.quantity = event.getQuantity();
         this.price = event.getPrice();
+        this.userId = event.getUserId();
         this.status = OrderStatus.CREATED;
     }
 

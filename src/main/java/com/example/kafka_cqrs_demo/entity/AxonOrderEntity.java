@@ -18,4 +18,5 @@ public class AxonOrderEntity {
     private String status;
     private String cancelReason;
     private LocalDateTime createTime;
+    private String userId;
 }

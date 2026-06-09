@@ -16,19 +16,14 @@ import org.springframework.context.annotation.ComponentScan;
 @SpringBootApplication
 @ComponentScan(basePackages = "com.example.kafka_cqrs_demo")
 @EntityScan(basePackages = {
-    "com.example.kafka_cqrs_demo",
-    "org.axonframework.eventsourcing.eventstore.jpa",
-    "org.axonframework.modelling.saga.repository.jpa",
-    "org.axonframework.eventhandling.tokenstore.jpa",
-    "org.axonframework.eventhandling.deadletter.jpa"
+        "com.example.kafka_cqrs_demo",
+        "org.axonframework.eventsourcing.eventstore.jpa",
+        "org.axonframework.modelling.saga.repository.jpa",
+        "org.axonframework.eventhandling.tokenstore.jpa",
+        "org.axonframework.eventhandling.deadletter.jpa"
 })
 public class KafkaCqrsDemoApplication {
 
-    /**
-     * Java 應用程式主進入點。
-     *
-     * @param args 外部傳入的命令列參數
-     */
     public static void main(String[] args) {
         SpringApplication.run(KafkaCqrsDemoApplication.class, args);
     }

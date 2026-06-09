@@ -24,4 +24,7 @@ public class CreateOrderRequest {
     /** 商品單價，限制不可為負數 */
     @Min(value = 0, message = "價格不能為負數")
     private long price;
+
+    /** 使用者唯一識別碼 */
+    private String userId;
 }

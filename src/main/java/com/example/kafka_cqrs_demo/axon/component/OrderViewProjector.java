@@ -67,6 +67,7 @@ public class OrderViewProjector {
             orderEntity.setPrice(event.getPrice());
             orderEntity.setStatus(OrderStatus.CREATED.name());
             orderEntity.setCreateTime(LocalDateTime.now());
+            orderEntity.setUserId(event.getUserId());
             orderRepository.save(orderEntity);
             log.info("[Projection] MySQL 訂單 {} 寫入成功", event.getOrderId());
         } catch (Exception e) {
