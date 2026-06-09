@@ -75,18 +75,8 @@ public class InventorySyncConsumer {
     }
 
     private void handleReserve(InventorySyncEvent event) {
-        // 1. 更新商品庫存
-        Optional<AxonInventoryEntity> inventoryOpt = inventoryRepository.findById(event.getProductId());
-        if (inventoryOpt.isPresent()) {
-            AxonInventoryEntity inventory = inventoryOpt.get();
-            inventory.setStock(Math.max(0, inventory.getStock() - event.getQuantity()));
-            inventory.setReservedStock(inventory.getReservedStock() + event.getQuantity());
-            inventoryRepository.save(inventory);
-            log.info("[InventorySyncConsumer] MySQL 已同步庫存扣減 (RESERVE): product={}, stock={}, reserved={}",
-                    event.getProductId(), inventory.getStock(), inventory.getReservedStock());
-        } else {
-            log.error("[InventorySyncConsumer] MySQL 未找到商品 {}，無法同步扣減可用庫存", event.getProductId());
-        }
+        // 1. 更新商品庫存 (具備樂觀鎖重試機制)
+        updateInventoryWithRetry(event.getProductId(), -event.getQuantity(), event.getQuantity());
 
         // 2. 建立預留明細記錄
         AxonStockReservationEntity reservation = new AxonStockReservationEntity(
@@ -110,15 +100,9 @@ public class InventorySyncConsumer {
                 reservation.setUpdateTime(LocalDateTime.now());
                 reservationRepository.save(reservation);
 
-                // 扣除預留庫存
-                Optional<AxonInventoryEntity> inventoryOpt = inventoryRepository.findById(reservation.getProductId());
-                if (inventoryOpt.isPresent()) {
-                    AxonInventoryEntity inventory = inventoryOpt.get();
-                    inventory.setReservedStock(Math.max(0, inventory.getReservedStock() - reservation.getQuantity()));
-                    inventoryRepository.save(inventory);
-                    log.info("[InventorySyncConsumer] MySQL 已同步完成扣減 (COMMIT): orderId={}, reserved={}",
-                            event.getOrderId(), inventory.getReservedStock());
-                }
+                // 扣除預留庫存 (具備樂觀鎖重試機制)
+                updateInventoryWithRetry(reservation.getProductId(), 0, -reservation.getQuantity());
+                log.info("[InventorySyncConsumer] MySQL 已同步完成扣減 (COMMIT): orderId={}", event.getOrderId());
             } else {
                 log.info("[InventorySyncConsumer] MySQL 訂單 {} 預留狀態非 RESERVED ({})，忽略 COMMIT",
                         event.getOrderId(), reservation.getStatus());
@@ -138,16 +122,9 @@ public class InventorySyncConsumer {
                 reservation.setUpdateTime(LocalDateTime.now());
                 reservationRepository.save(reservation);
 
-                // 退回可用庫存，扣減預留庫存
-                Optional<AxonInventoryEntity> inventoryOpt = inventoryRepository.findById(reservation.getProductId());
-                if (inventoryOpt.isPresent()) {
-                    AxonInventoryEntity inventory = inventoryOpt.get();
-                    inventory.setStock(inventory.getStock() + reservation.getQuantity());
-                    inventory.setReservedStock(Math.max(0, inventory.getReservedStock() - reservation.getQuantity()));
-                    inventoryRepository.save(inventory);
-                    log.info("[InventorySyncConsumer] MySQL 已同步釋放預留 (RELEASE): orderId={}, stock={}, reserved={}",
-                            event.getOrderId(), inventory.getStock(), inventory.getReservedStock());
-                }
+                // 退回可用庫存，扣減預留庫存 (具備樂觀鎖重試機制)
+                updateInventoryWithRetry(reservation.getProductId(), reservation.getQuantity(), -reservation.getQuantity());
+                log.info("[InventorySyncConsumer] MySQL 已同步釋放預留 (RELEASE): orderId={}", event.getOrderId());
             } else {
                 log.info("[InventorySyncConsumer] MySQL 訂單 {} 預留狀態非 RESERVED ({})，忽略 RELEASE",
                         event.getOrderId(), reservation.getStatus());
@@ -167,21 +144,32 @@ public class InventorySyncConsumer {
                 reservation.setUpdateTime(LocalDateTime.now());
                 reservationRepository.save(reservation);
 
-                // 退還可用庫存
-                Optional<AxonInventoryEntity> inventoryOpt = inventoryRepository.findById(reservation.getProductId());
-                if (inventoryOpt.isPresent()) {
-                    AxonInventoryEntity inventory = inventoryOpt.get();
-                    inventory.setStock(inventory.getStock() + reservation.getQuantity());
-                    inventoryRepository.save(inventory);
-                    log.info("[InventorySyncConsumer] MySQL 已同步退款庫存 (REFUND): orderId={}, stock={}",
-                            event.getOrderId(), inventory.getStock());
-                }
+                // 退還可用庫存 (具備樂觀鎖重試機制)
+                updateInventoryWithRetry(reservation.getProductId(), reservation.getQuantity(), 0);
+                log.info("[InventorySyncConsumer] MySQL 已同步退款庫存 (REFUND): orderId={}", event.getOrderId());
             } else {
                 log.info("[InventorySyncConsumer] MySQL 訂單 {} 預留狀態非 COMPLETED ({})，忽略 REFUND",
                         event.getOrderId(), reservation.getStatus());
             }
         } else {
             log.warn("[InventorySyncConsumer] MySQL 未找到訂單 {} 的預留記錄，無法執行 REFUND 同步", event.getOrderId());
+        }
+    }
+
+    /**
+     * 更新商品庫存與預留庫存，拋出樂觀鎖例外以觸發 Kafka 重試機制與全新交易。
+     */
+    private void updateInventoryWithRetry(String productId, int stockDelta, int reservedDelta) {
+        Optional<AxonInventoryEntity> inventoryOpt = inventoryRepository.findById(productId);
+        if (inventoryOpt.isPresent()) {
+            AxonInventoryEntity inventory = inventoryOpt.get();
+            inventory.setStock(Math.max(0, inventory.getStock() + stockDelta));
+            inventory.setReservedStock(Math.max(0, inventory.getReservedStock() + reservedDelta));
+            // 若發生併發更新，save 將直接拋出 ObjectOptimisticLockingFailureException。
+            // 異常會直接往上拋出使當前交易 Rollback，由 Spring Kafka ErrorHandler 觸發整筆訊息的重新消費與全新交易重試。
+            inventoryRepository.save(inventory);
+        } else {
+            log.error("[InventorySyncConsumer] MySQL 未找到商品 {}，無法同步庫存變更", productId);
         }
     }
 }

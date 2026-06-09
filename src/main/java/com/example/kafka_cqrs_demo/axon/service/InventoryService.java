@@ -145,8 +145,8 @@ public class InventoryService {
                             System.currentTimeMillis()
                     );
                     String json = objectMapper.writeValueAsString(syncEvent);
-                    kafkaTemplate.send(InventoryKafkaConfig.INVENTORY_SYNC_TOPIC, orderId, json);
-                    log.info("[InventoryService] 已發送庫存預留同步訊息至 Kafka: orderId={}", orderId);
+                    kafkaTemplate.send(InventoryKafkaConfig.INVENTORY_SYNC_TOPIC, productId, json);
+                    log.info("[InventoryService] 已發送庫存預留同步訊息至 Kafka: orderId={}, productId={}", orderId, productId);
                 } catch (Exception e) {
                     log.error("[InventoryService] 發送 Kafka 同步訊息失敗: {}", e.getMessage(), e);
                 }
@@ -352,7 +352,7 @@ public class InventoryService {
                     System.currentTimeMillis()
             );
             String json = objectMapper.writeValueAsString(syncEvent);
-            kafkaTemplate.send(InventoryKafkaConfig.INVENTORY_SYNC_TOPIC, orderId, json);
+            kafkaTemplate.send(InventoryKafkaConfig.INVENTORY_SYNC_TOPIC, productId, json);
         } catch (Exception e) {
             log.error("[InventoryService] 發送 {} 同步訊息失敗: {}", action, e.getMessage(), e);
         }

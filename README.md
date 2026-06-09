@@ -23,7 +23,9 @@
 * **Redisson 分散式鎖庫存扣減**：
   * 收到 `ReserveStockCommand` 時，透過 Redisson Client 的商品分散式鎖 (`RLock`) 鎖定商品 ID。
   * 在臨界區內執行 Redis `RBucket` 與 `RMap` 的原子庫存檢查、扣減與記錄，徹底防範高併發下的超賣問題，並利用 Watchdog 機制自動續期，防止鎖提前失效。
-* **Kafka 最終一致性同步**：Redis 扣減或釋放成功後，發送 `InventorySyncEvent` 訊息至 Kafka `inventory-sync-events` 主題，由背景 Consumer 異步落庫寫回 MySQL，保證最終一致性。
+* **Kafka 最終一致性同步與寫入優化**：
+  * Redis 扣減或釋放成功後，發送 `InventorySyncEvent` 訊息至 Kafka `inventory-sync-events` 主題，以 **`productId`** 作為 Partition Key，保證同一商品的所有更新序列化在同一個分割區，避免跨執行緒資料庫寫入競爭。
+  * 背景 Consumer 異步落庫寫回 MySQL，並實作 **JPA 樂觀鎖 (`@Version`)** 防護與 **衝突自動重試機制**，確保最終一致性的絕對安全與極致寫入效能。
 * **模擬外部金流防腐層 (PaymentAdapter/ACL)**：
   * 移除本地資料庫強耦合，解耦為獨立外部金流 API (`MockExternalPaymentController`)。
   * `PaymentAdapter` 扮演防腐層，透過 HTTP REST API 請求外部扣款/退款，將結果轉譯為 Axon 事件推動 Saga。
