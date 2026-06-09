@@ -28,10 +28,10 @@ spring:
     database-platform: org.hibernate.dialect.MySQLDialect
     hibernate:
       ddl-auto: update        # 啟動時自動檢查並根據實體結構更新資料庫 schema
-    show-sql: true            # 在控制台列印 Hibernate 實際執行的 SQL 語句
+    show-sql: false           # 關閉控制台列印 Hibernate 實際執行的 SQL 語句
     properties:
       hibernate:
-        format_sql: true      # 格式化輸出 SQL，以提高排版可讀性
+        format_sql: false     # 關閉格式化輸出 SQL
 
   # =========================================================================
   # 3. Kafka 分散式佇列與訊息重試機制配置 (Kafka Configuration)
@@ -70,11 +70,8 @@ spring:
 # =========================================================================
 axon:
   axonserver:
-    servers: localhost:8124  # 強制指定 Axon Server 的主機連線位址與埠口
-    context: default         # 配置當前應用的 Axon 註冊上下文 (Context) 名稱為 default
-    connect-timeout: 60000   # 與 Axon Server 建立 gRPC 連線的握手等待超時時間設定為 60 秒 (60000 毫秒)
-    keep-alive-time: 60000   # gRPC 連線的心跳維持週期設定為 60 秒，能有效解決連線長時間閒置被防火牆中斷的問題
+    enabled: false           # 停用 Axon Server，改用本地資料庫進行儲存
   serializer:
-    general: xstream         # 全域預設使用的序列化工具指定為 XStream
-    events: xstream          # 事件儲存序列化工具指定為 XStream
-    messages: xstream        # 系統指令與查詢訊息序列化工具指定為 XStream
+    general: jackson         # 全域預設使用的序列化工具指定為 Jackson (JSON)
+    events: jackson          # 事件儲存序列化工具指定為 Jackson
+    messages: jackson        # 系統指令與查詢訊息序列化工具指定為 Jackson

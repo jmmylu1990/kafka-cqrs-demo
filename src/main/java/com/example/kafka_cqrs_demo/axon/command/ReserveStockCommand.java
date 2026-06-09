@@ -21,4 +21,7 @@ public class ReserveStockCommand {
 
     /** 欲預留商品庫存的產品唯一識別碼 */
     private String productId;
+
+    /** 欲預留的商品數量 */
+    private int quantity;
 }

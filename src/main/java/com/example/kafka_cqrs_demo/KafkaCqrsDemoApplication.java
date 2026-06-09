@@ -2,6 +2,7 @@ package com.example.kafka_cqrs_demo;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.context.annotation.ComponentScan;
 
 /**
@@ -14,6 +15,13 @@ import org.springframework.context.annotation.ComponentScan;
  */
 @SpringBootApplication
 @ComponentScan(basePackages = "com.example.kafka_cqrs_demo")
+@EntityScan(basePackages = {
+    "com.example.kafka_cqrs_demo",
+    "org.axonframework.eventsourcing.eventstore.jpa",
+    "org.axonframework.modelling.saga.repository.jpa",
+    "org.axonframework.eventhandling.tokenstore.jpa",
+    "org.axonframework.eventhandling.deadletter.jpa"
+})
 public class KafkaCqrsDemoApplication {
 
     /**

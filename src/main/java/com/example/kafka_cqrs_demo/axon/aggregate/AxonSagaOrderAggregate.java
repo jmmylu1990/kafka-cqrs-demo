@@ -128,6 +128,10 @@ public class AxonSagaOrderAggregate {
      */
     @CommandHandler
     public void handle(CancelOrderCommand command) {
+        if (this.status == OrderStatus.CANCELLED) {
+            log.warn("訂單 {} 已經是取消狀態，忽略重複的取消指令", command.getOrderId());
+            return;
+        }
         if (this.status == OrderStatus.SHIPPED || this.status == OrderStatus.DELIVERED) {
             throw new IllegalStateException("已出貨或送達的訂單無法取消");
         }
@@ -209,7 +213,4 @@ public class AxonSagaOrderAggregate {
         this.status = OrderStatus.PENDING_PAYMENT;
         log.info("[EventSourcingHandler] 庫存預留成功，訂單狀態變更為 PENDING_PAYMENT");
     }
-}
-
-
 }

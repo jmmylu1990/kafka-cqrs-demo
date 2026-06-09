@@ -4,6 +4,7 @@ import com.example.kafka_cqrs_demo.axon.command.CancelOrderCommand;
 import com.example.kafka_cqrs_demo.axon.command.ConfirmPaymentCommand;
 import com.example.kafka_cqrs_demo.axon.command.ConfirmStockReservedCommand;
 import com.example.kafka_cqrs_demo.axon.command.ReserveStockCommand;
+import com.example.kafka_cqrs_demo.axon.event.OrderCancelledEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderCreatedEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderPaidEvent;
 import com.example.kafka_cqrs_demo.axon.event.StockFailedEvent;
@@ -64,7 +65,7 @@ public class OrderSaga {
     @SagaEventHandler(associationProperty = "orderId")
     public void handle(OrderCreatedEvent event) {
         log.info("[Saga] 訂單 {}, 開始執行庫存預留", event.getOrderId());
-        commandGateway.send(new ReserveStockCommand(event.getOrderId(), event.getProductId()));
+        commandGateway.send(new ReserveStockCommand(event.getOrderId(), event.getProductId(), event.getQuantity()));
     }
 
     /**
@@ -89,11 +90,9 @@ public class OrderSaga {
     /**
      * 付款超時處理器 (Deadline Handler)。
      * 當設定的 15 分鐘截止時間到達且未被手動取消時，Axon 會呼叫此方法。
-     * 此處標註了 @EndSaga，表示一旦超時自動取消指令送出，此 Saga 生命週期即告結束。
      *
      * @param orderId 觸發此逾時任務的訂單識別碼
      */
-    @EndSaga
     @DeadlineHandler(deadlineName = "payment-deadline")
     public void onPaymentDeadline(String orderId) {
         log.warn("[Saga] 訂單 {} 付款超時，執行自動取消", orderId);
@@ -104,11 +103,9 @@ public class OrderSaga {
      * 庫存扣減失敗（庫存不足）的補償事件處理器。
      * 當監聽到 StockFailedEvent 時，代表無法成功預留庫存，
      * 此時需要發送 CancelOrderCommand 指令將訂單狀態改為已取消。
-     * 由於這是該交易的終點，因此標註 @EndSaga 以結束此 Saga 實例生命週期。
      *
      * @param event 庫存扣減失敗事件
      */
-    @EndSaga
     @SagaEventHandler(associationProperty = "orderId")
     public void handle(StockFailedEvent event) {
         log.info("[Saga] 庫存不足，執行補償取消: {}", event.getOrderId());
@@ -127,6 +124,23 @@ public class OrderSaga {
     @SagaEventHandler(associationProperty = "orderId")
     public void handle(OrderPaidEvent event) {
         log.info("[Saga] 訂單 {} 已確認付款，Saga 流程圓滿結束", event.getOrderId());
+
+        // 取消先前設定的付款截止計時器
+        deadlineManager.cancelSchedule("payment-deadline", event.getOrderId());
+    }
+
+    /**
+     * 訂單取消事件處理器。
+     * 當監聽到 OrderCancelledEvent 時（不論是手動取消、逾時取消或庫存不足取消）：
+     * 1. 標註 @EndSaga 結束此 Saga 實例。
+     * 2. 取消先前設定的付款截止計時器（如果存在）。
+     *
+     * @param event 訂單已取消事件
+     */
+    @EndSaga
+    @SagaEventHandler(associationProperty = "orderId")
+    public void handle(OrderCancelledEvent event) {
+        log.info("[Saga] 訂單 {} 已取消，Saga 流程結束", event.getOrderId());
 
         // 取消先前設定的付款截止計時器
         deadlineManager.cancelSchedule("payment-deadline", event.getOrderId());
