@@ -17,16 +17,16 @@
   * 消費端引入 Redis 分散式鎖進行業務去重，防止重複消費。
   * 發送事件時以 `orderId` 作為 Kafka Key，確保同一筆訂單的事件進入同一個 Partition，保證消費順序性。
 
-### 2. Axon Saga 事件溯源模式 (Axon Module)
-本模組實作了基於領域驅動設計 (DDD) 的事件溯源與 Saga 分散式事務協調器：
-* **去 Axon Server 架構**：停用 Axon Server（`axon.axonserver.enabled: false`），顯式配置本地 `JpaEventStorageEngine`，並註冊自訂 `axonTransactionManager` 全域事務管理器，將事件日誌持久化於 MySQL 表格中。
-* **持久化事件進度**：配置 `JpaTokenStore` 以便將事件處理器的進度進度（Token）儲存於資料庫（`token_entry`），避免應用程式重啟時重複重放所有歷史事件。
-* **庫存預留與補償機制 (Saga)**：
-  * 訂單建立後，由 `OrderSaga` 協調器非同步發送 `ReserveStockCommand` 至庫存模組。
-  * 庫存充足時，扣減可用庫存並增加預留庫存，同時記錄 `t_axon_stock_reservation` 預留明細。
-  * 若付款成功，正式扣除預留庫存，將預留記錄標記為 `COMPLETED`。
-  * 若付款超時或手動取消，Saga 執行補償動作釋放預留量，並將可用庫存加回。
-  * 支援已付款訂單售後取消（退貨），能自動將已扣除的庫存退回可用庫存。
+### 2. Axon Saga 事件溯源與高併發設計 (Axon Module)
+本模組實作了基於領域驅動設計 (DDD) 的事件溯源、Saga 分散式事務協調與高併發寫入優化：
+* **去 Axon Server 架構**：停用 Axon Server（`axon.axonserver.enabled: false`），改由本地 MySQL 與 Redis 處理狀態。
+* **Redisson 分散式鎖庫存扣減**：
+  * 收到 `ReserveStockCommand` 時，透過 Redisson Client 的商品分散式鎖 (`RLock`) 鎖定商品 ID。
+  * 在臨界區內執行 Redis `RBucket` 與 `RMap` 的原子庫存檢查、扣減與記錄，徹底防範高併發下的超賣問題，並利用 Watchdog 機制自動續期，防止鎖提前失效。
+* **Kafka 最終一致性同步**：Redis 扣減或釋放成功後，發送 `InventorySyncEvent` 訊息至 Kafka `inventory-sync-events` 主題，由背景 Consumer 異步落庫寫回 MySQL，保證最終一致性。
+* **模擬外部金流防腐層 (PaymentAdapter/ACL)**：
+  * 移除本地資料庫強耦合，解耦為獨立外部金流 API (`MockExternalPaymentController`)。
+  * `PaymentAdapter` 扮演防腐層，透過 HTTP REST API 請求外部扣款/退款，將結果轉譯為 Axon 事件推動 Saga。
 
 ---
 
@@ -40,13 +40,14 @@ Axon 模組使用以下 MySQL 表格進行狀態儲存：
    * `quantity` (INT)
    * `price` (BIGINT)
    * `status` (VARCHAR, 例如: CREATED, PENDING_PAYMENT, PAID, CANCELLED)
-   * `cancel_reason` (VARCHAR, 取消原因)
+   * `cancel_reason` (VARCHAR)
    * `create_time` (DATETIME)
+   * `user_id` (VARCHAR)
 
 2. **t_axon_inventory (庫存實體表)**
    * `product_id` (VARCHAR, 主鍵)
    * `stock` (INT, 當前可用庫存)
-   * `reserved_stock` (INT, 被預留鎖定的庫存)
+   * `reserved_stock` (INT, 預留鎖定的庫存)
 
 3. **t_axon_stock_reservation (庫存預留明細表)**
    * `order_id` (VARCHAR, 主鍵)
@@ -54,6 +55,19 @@ Axon 模組使用以下 MySQL 表格進行狀態儲存：
    * `quantity` (INT)
    * `status` (VARCHAR, 狀態: RESERVED, COMPLETED, RELEASED, REFUNDED)
    * `update_time` (DATETIME)
+
+4. **t_axon_wallet (錢包帳戶表 - 模擬外部金流)**
+   * `user_id` (VARCHAR, 主鍵)
+   * `balance` (BIGINT, 餘額)
+
+5. **t_axon_wallet_transaction (錢包交易明細表 - 模擬外部金流)**
+   * `transaction_id` (VARCHAR, 主鍵)
+   * `user_id` (VARCHAR)
+   * `order_id` (VARCHAR)
+   * `amount` (BIGINT)
+   * `type` (VARCHAR, DEBIT/REFUND)
+   * `status` (VARCHAR, SUCCESS/FAILED)
+   * `create_time` (DATETIME)
 
 ---
 
@@ -64,17 +78,17 @@ Axon 模組使用以下 MySQL 表格進行狀態儲存：
 ### 1. 執行資料庫重置 SQL
 在您的 MySQL 管理工具中對目標資料庫執行以下 SQL 語法：
 ```sql
--- 清空歷史業務資料
+SET FOREIGN_KEY_CHECKS = 0;
 TRUNCATE TABLE t_axon_order;
 TRUNCATE TABLE t_axon_stock_reservation;
 TRUNCATE TABLE t_axon_inventory;
-
--- 清空 Axon 框架系統資料表
+TRUNCATE TABLE t_axon_wallet;
+TRUNCATE TABLE t_axon_wallet_transaction;
 TRUNCATE TABLE domain_event_entry;
-TRUNCATE TABLE snapshot_event_entry;
-TRUNCATE TABLE association_value_entry;
-TRUNCATE TABLE saga_entry;
 TRUNCATE TABLE token_entry;
+TRUNCATE TABLE saga_entry;
+TRUNCATE TABLE association_value_entry;
+SET FOREIGN_KEY_CHECKS = 1;
 ```
 
 ### 2. 清空 Redis 快取
@@ -84,46 +98,54 @@ redis-cli FLUSHALL
 ```
 
 ### 3. 啟動服務
-重啟您的 Spring Boot 服務。啟動時，`AxonDatabaseInitializer` 會自動在 `t_axon_inventory` 表格中插入三筆預設測試商品數據：
-* `PROD-001`：可用庫存 100 件，預留 0 件。
-* `PROD-002`：可用庫存 5 件，預留 0 件。
-* `PROD-003`：可用庫存 0 件，預留 0 件（供測試庫存扣減失敗與自動補償）。
+重啟您的 Spring Boot 服務。啟動時，`AxonDatabaseInitializer` 會自動在資料庫與 Redis 中配置測試資料：
+* 商品 `PROD-001`：庫存 100 件（Redis Key: `product:PROD-001:stock`）。
+* 使用者 `USER-001`：餘額 1000 元。
+* 使用者 `USER-002`：餘額 10 元。
 
 ---
 
-## 手動測試順序與 SQL 驗證指南
+## 手動測試流程與 SQL 驗證指南
 
-服務啟動後（預設埠口為 8081），請使用以下四個場景進行功能驗證。
+本專案啟動後（預設埠口為 8081），請使用 Postman/cURL 依序執行以下場景：
 
 ### 場景一：正常付款流程 (Happy Path)
+* 使用者 `USER-001` 購買 **5 件** 單價 **10 元** 的商品（總金額 50 元）。
 
-驗證「下單 -> 扣減並預留庫存 -> 支付成功 -> 完成扣庫存」的正常流程。
-
-#### 1. 發送建立訂單請求 (購買 PROD-001 數量 2 件)
+#### 1. 發送建立訂單請求
 ```bash
 curl --location 'http://localhost:8081/axonsaga/api/orders' \
 --header 'Content-Type: application/json' \
 --data '{
     "productId": "PROD-001",
-    "quantity": 2,
-    "price": 100
+    "quantity": 5,
+    "price": 10,
+    "userId": "USER-001"
 }'
 ```
-> **注意**：請記錄 API 回傳的訂單 UUID（以下用 `{orderId}` 代替）。
+> **注意**：請複製 API 回傳的 `{orderId}`。
 
-#### 2. 第一階段 SQL 驗證
-```sql
--- 1. 驗證訂單狀態變更為 PENDING_PAYMENT
-SELECT order_id, product_id, quantity, price, status, cancel_reason FROM t_axon_order WHERE order_id = '{orderId}';
+#### 2. 第一階段：檢查庫存已於 Redis 預留，並非同步落庫 MySQL
+* **Redis 快取檢查**：
+  ```bash
+  # 可用庫存扣減為 95
+  redis-cli GET product:PROD-001:stock
+  # 預留庫存增加為 5
+  redis-cli GET product:PROD-001:reserved
+  # 訂單預留哈希表狀態為 RESERVED
+  redis-cli HGETALL order:{orderId}:reservation
+  ```
+* **MySQL SQL 驗證**：
+  ```sql
+  -- 可用/預留庫存同步為 95 / 5
+  SELECT product_id, stock, reserved_stock FROM t_axon_inventory WHERE product_id = 'PROD-001';
+  -- 預留明細記錄狀態為 RESERVED
+  SELECT order_id, product_id, quantity, status FROM t_axon_stock_reservation WHERE order_id = '{orderId}';
+  -- 訂單狀態為 PENDING_PAYMENT
+  SELECT order_id, status, user_id FROM t_axon_order WHERE order_id = '{orderId}';
+  ```
 
--- 2. 驗證可用庫存已扣減 2，預留庫存增加 2 (PROD-001 應為 stock = 98, reserved_stock = 2)
-SELECT product_id, stock, reserved_stock FROM t_axon_inventory WHERE product_id = 'PROD-001';
-
--- 3. 驗證生成一筆狀態為 RESERVED 且數量為 2 的預留明細
-SELECT order_id, product_id, quantity, status FROM t_axon_stock_reservation WHERE order_id = '{orderId}';
-```
-
-#### 3. 對該訂單發送付款確認請求
+#### 3. 對該訂單發送付款確認請求 (無須帶入 userId)
 ```bash
 curl --location 'http://localhost:8081/axonsaga/api/orders/pay' \
 --header 'Content-Type: application/json' \
@@ -132,131 +154,146 @@ curl --location 'http://localhost:8081/axonsaga/api/orders/pay' \
 }'
 ```
 
-#### 4. 第二階段 SQL 驗證
-```sql
--- 1. 驗證訂單狀態成功變更為 PAID
-SELECT order_id, status FROM t_axon_order WHERE order_id = '{orderId}';
-
--- 2. 驗證可用庫存仍為 98，但預留庫存清空為 0 (PROD-001 應為 stock = 98, reserved_stock = 0)
-SELECT product_id, stock, reserved_stock FROM t_axon_inventory WHERE product_id = 'PROD-001';
-
--- 3. 驗證預留明細狀態更新為 COMPLETED
-SELECT order_id, status FROM t_axon_stock_reservation WHERE order_id = '{orderId}';
-```
+#### 4. 第二階段：檢查付款完成，預留庫存扣減，金額被扣除
+* **Redis 快取檢查**：
+  ```bash
+  # 預留庫存歸零為 0
+  redis-cli GET product:PROD-001:reserved
+  # 訂單預留雜湊狀態更新為 COMPLETED
+  redis-cli HGET order:{orderId}:reservation status
+  ```
+* **MySQL SQL 驗證**：
+  ```sql
+  -- 可用 95, 預留 0
+  SELECT product_id, stock, reserved_stock FROM t_axon_inventory WHERE product_id = 'PROD-001';
+  -- 預留明細更新為 COMPLETED
+  SELECT status FROM t_axon_stock_reservation WHERE order_id = '{orderId}';
+  -- 訂單狀態更新為 PAID
+  SELECT order_id, status FROM t_axon_order WHERE order_id = '{orderId}';
+  -- USER-001 錢包餘額由 1000 扣除為 950
+  SELECT user_id, balance FROM t_axon_wallet WHERE user_id = 'USER-001';
+  -- 交易流水為 SUCCESS (-50)
+  SELECT user_id, amount, type, status FROM t_axon_wallet_transaction WHERE order_id = '{orderId}';
+  ```
 
 ---
 
-### 場景二：未付款手動取消 (釋放預留庫存)
+### 場景二：餘額不足導致扣款失敗 (Saga 自動回滾釋放 Redis 庫存)
+* 使用者 `USER-002`（餘額僅 10 元）購買 **5 件** 單價 **10 元** 的商品（總金額 50 元）。
 
-驗證在待付款狀態下，手動取消訂單後，預留庫存安全退回至可用庫存中。
-
-#### 1. 發送建立訂單請求 (購買 PROD-001 數量 3 件)
+#### 1. 發送建立訂單請求
 ```bash
 curl --location 'http://localhost:8081/axonsaga/api/orders' \
 --header 'Content-Type: application/json' \
 --data '{
     "productId": "PROD-001",
-    "quantity": 3,
-    "price": 100
+    "quantity": 5,
+    "price": 10,
+    "userId": "USER-002"
 }'
 ```
-> **注意**：記錄 API 回傳的 `{orderId}`。此時 PROD-001 庫存狀態應為：`stock = 95, reserved_stock = 3`。
+> **注意**：記錄 API 回傳的第二個 `{orderId}`。
 
-#### 2. 發送取消訂單請求
+#### 2. 送出付款確認請求
+```bash
+curl --location 'http://localhost:8081/axonsaga/api/orders/pay' \
+--header 'Content-Type: application/json' \
+--data '{
+    "orderId": "{orderId}"
+}'
+```
+
+#### 3. 第三階段：檢查扣款失敗，庫存安全退回
+* **Redis 快取檢查**：
+  ```bash
+  # 可用庫存安全加回，維持 95
+  redis-cli GET product:PROD-001:stock
+  # 預留庫存歸零為 0
+  redis-cli GET product:PROD-001:reserved
+  # 狀態變更為 RELEASED
+  redis-cli HGET order:{orderId}:reservation status
+  ```
+* **MySQL SQL 驗證**：
+  ```sql
+  -- MySQL 可用 95, 預留 0
+  SELECT product_id, stock, reserved_stock FROM t_axon_inventory WHERE product_id = 'PROD-001';
+  -- 預留明細更新為 RELEASED
+  SELECT status FROM t_axon_stock_reservation WHERE order_id = '{orderId}';
+  -- 訂單狀態更新為 CANCELLED，原因為扣款失敗
+  SELECT order_id, status, cancel_reason FROM t_axon_order WHERE order_id = '{orderId}';
+  -- USER-002 餘額仍為 10 元
+  SELECT user_id, balance FROM t_axon_wallet WHERE user_id = 'USER-002';
+  ```
+
+---
+
+### 場景三：已付款訂單售後取消 (自動退款補償)
+* 針對場景一成功付款的訂單進行取消。
+
+#### 1. 發送取消請求
 ```bash
 curl --location 'http://localhost:8081/axonsaga/api/orders/cancel' \
 --header 'Content-Type: application/json' \
 --data '{
-    "orderId": "{orderId}",
-    "reason": "手動放棄購買"
+    "orderId": "{場景一成功的orderId}",
+    "reason": "售後七天無條件退貨"
 }'
 ```
 
-#### 3. SQL 驗證
-```sql
--- 1. 驗證訂單狀態成功變更為 CANCELLED，且 cancel_reason 為 '手動放棄購買'
-SELECT order_id, status, cancel_reason FROM t_axon_order WHERE order_id = '{orderId}';
-
--- 2. 驗證可用庫存與預留庫存已退回 (PROD-001 應回歸 stock = 98, reserved_stock = 0)
-SELECT product_id, stock, reserved_stock FROM t_axon_inventory WHERE product_id = 'PROD-001';
-
--- 3. 驗證預留明細狀態更新為 RELEASED
-SELECT order_id, status FROM t_axon_stock_reservation WHERE order_id = '{orderId}';
-```
-
----
-
-### 場景三：已付款訂單售後取消 (退貨退款)
-
-驗證已完成付款的訂單進行取消時，可用庫存能夠正確回加。
-
-#### 1. 建立訂單並完成付款 (購買 PROD-001 數量 5 件)
-1. **建立訂單**：
-   ```bash
-   curl --location 'http://localhost:8081/axonsaga/api/orders' \
-   --header 'Content-Type: application/json' \
-   --data '{
-       "productId": "PROD-001",
-       "quantity": 5,
-       "price": 100
-   }'
-   ```
-   > **注意**：記錄 API 回傳的 `{orderId}`。
-2. **對該訂單付款**：
-   ```bash
-   curl --location 'http://localhost:8081/axonsaga/api/orders/pay' \
-   --header 'Content-Type: application/json' \
-   --data '{
-       "orderId": "{orderId}"
-   }'
-   ```
-> **此時庫存狀態**：PROD-001 的 `stock = 93, reserved_stock = 0`。
-
-#### 2. 對已付款的訂單發送取消（售後退款）請求
-```bash
-curl --location 'http://localhost:8081/axonsaga/api/orders/cancel' \
---header 'Content-Type: application/json' \
---data '{
-    "orderId": "{orderId}",
-    "reason": "售後申請退款"
-}'
-```
-
-#### 3. SQL 驗證
-```sql
--- 1. 驗證訂單狀態變更為 CANCELLED，且 cancel_reason 為 '售後申請退款'
-SELECT order_id, status, cancel_reason FROM t_axon_order WHERE order_id = '{orderId}';
-
--- 2. 驗證可用庫存已退回 (PROD-001 可用庫存應加回 5 件變為 stock = 98, reserved_stock = 0)
-SELECT product_id, stock, reserved_stock FROM t_axon_inventory WHERE product_id = 'PROD-001';
-
--- 3. 驗證預留明細狀態更新為 REFUNDED
-SELECT order_id, status FROM t_axon_stock_reservation WHERE order_id = '{orderId}';
-```
+#### 2. 第四階段：檢查錢包加回，Redis 可用庫存退回
+* **Redis 快取檢查**：
+  ```bash
+  # 可用庫存退回，由 95 增加為 100
+  redis-cli GET product:PROD-001:stock
+  # 狀態更新為 REFUNDED
+  redis-cli HGET order:{場景一成功的orderId}:reservation status
+  ```
+* **MySQL SQL 驗證**：
+  ```sql
+  -- 可用庫存回復至 100, 預留 0
+  SELECT product_id, stock, reserved_stock FROM t_axon_inventory WHERE product_id = 'PROD-001';
+  -- 預留記錄狀態更新為 REFUNDED
+  SELECT status FROM t_axon_stock_reservation WHERE order_id = '{場景一成功的orderId}';
+  -- 訂單狀態更新為 CANCELLED，取消原因為退貨
+  SELECT order_id, status, cancel_reason FROM t_axon_order WHERE order_id = '{場景一成功的orderId}';
+  -- USER-001 餘額退回至 1000 元
+  SELECT user_id, balance FROM t_axon_wallet WHERE user_id = 'USER-001';
+  ```
 
 ---
 
-### 場景四：庫存不足自動取消 (Saga 自動補償)
+### 場景四：商品庫存不足自動取消 (Saga 自動補償)
+* 針對初始庫存為 0 的商品 `PROD-003` 進行下單，驗證 Saga 自動補償回滾。
 
-驗證商品庫存不足時，Saga 協調器捕獲失敗事件並自動發起補償指令將訂單狀態改為已取消。
-
-#### 1. 發送建立訂單請求 (訂購無庫存商品 PROD-003 數量 1 件)
+#### 1. 發送建立訂單請求 (購買 PROD-003 數量 1 件)
 ```bash
 curl --location 'http://localhost:8081/axonsaga/api/orders' \
 --header 'Content-Type: application/json' \
 --data '{
     "productId": "PROD-003",
     "quantity": 1,
-    "price": 100
+    "price": 100,
+    "userId": "USER-001"
 }'
 ```
-> **注意**：記錄 API 回傳的 `{orderId}`。
+> **注意**：請複製此時 API 回傳的第三個 `{orderId}`。
 
-#### 2. SQL 驗證
-```sql
--- 1. 驗證訂單狀態已自動更新為 CANCELLED，且 cancel_reason 為 '庫存不足'
-SELECT order_id, status, cancel_reason FROM t_axon_order WHERE order_id = '{orderId}';
+#### 2. 第五階段：檢查庫存預留失敗，訂單自動回滾取消
+* **Redis 快取檢查**：
+  ```bash
+  # 可用庫存依然維持為 0
+  redis-cli GET product:PROD-003:stock
+  # 預留庫存也維持為 0
+  redis-cli GET product:PROD-003:reserved
+  # 不會有此訂單的 reservation 雜湊表記錄
+  redis-cli KEYS order:{orderId}:reservation
+  ```
+* **MySQL SQL 驗證**：
+  ```sql
+  -- 1. 驗證訂單狀態已自動更新為 CANCELLED，且原因為 '庫存不足'
+  SELECT order_id, status, cancel_reason FROM t_axon_order WHERE order_id = '{orderId}';
 
--- 2. 驗證庫存預留表格不會有該 orderId 的成功預留紀錄
-SELECT order_id, status FROM t_axon_stock_reservation WHERE order_id = '{orderId}';
+  -- 2. 驗證庫存預留表格不會有該 orderId 的成功預留紀錄
+  SELECT order_id, status FROM t_axon_stock_reservation WHERE order_id = '{orderId}';
+  ```
 ```
