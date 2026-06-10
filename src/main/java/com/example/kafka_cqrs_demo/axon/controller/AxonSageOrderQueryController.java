@@ -34,6 +34,7 @@ public class AxonSageOrderQueryController {
     private final AxonOrderRepository orderRepository;
     private final ObjectMapper objectMapper;
     private final RedissonClient redissonClient;
+    private final io.micrometer.core.instrument.MeterRegistry meterRegistry;
 
     /**
      * 查詢控制器的建構子。
@@ -41,11 +42,13 @@ public class AxonSageOrderQueryController {
     public AxonSageOrderQueryController(StringRedisTemplate redisTemplate,
                                          AxonOrderRepository orderRepository,
                                          ObjectMapper objectMapper,
-                                         RedissonClient redissonClient) {
+                                         RedissonClient redissonClient,
+                                         io.micrometer.core.instrument.MeterRegistry meterRegistry) {
         this.redisTemplate = redisTemplate;
         this.orderRepository = orderRepository;
         this.objectMapper = objectMapper;
         this.redissonClient = redissonClient;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -65,7 +68,9 @@ public class AxonSageOrderQueryController {
         // 1. 先從 Redis 取得
         String orderJson = redisTemplate.opsForValue().get(key);
 
-        if (orderJson == null) {
+        if (orderJson != null) {
+            meterRegistry.counter("cache.requests", "type", "order", "result", "hit").increment();
+        } else {
             // 2. 獲取 Redis 分散式鎖，防範快取擊穿
             String lockKey = "lock:order:query:" + orderId;
             RLock lock = redissonClient.getLock(lockKey);
@@ -85,12 +90,14 @@ public class AxonSageOrderQueryController {
                             // 3. 回寫 Redis，設定 TTL 為 1 天
                             redisTemplate.opsForValue().set(key, orderJson, 1, TimeUnit.DAYS);
                             log.info("[DCL] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 1 天): {}", orderId);
+                            meterRegistry.counter("cache.requests", "type", "order", "result", "miss").increment();
                         } else {
                             log.warn("[DCL] 訂單不存在，ID: {}", orderId);
                             return "訂單不存在";
                         }
                     } else {
                         log.info("[DCL] 雙重檢查命中快取 (Double-Checked Cache Hit): {}", orderId);
+                        meterRegistry.counter("cache.requests", "type", "order", "result", "hit").increment();
                     }
                 } else {
                     // 獲取鎖超時，退避並嘗試重新讀取 Redis
@@ -100,6 +107,7 @@ public class AxonSageOrderQueryController {
                     if (orderJson == null) {
                         return "系統繁忙，請稍後再試";
                     }
+                    meterRegistry.counter("cache.requests", "type", "order", "result", "hit").increment();
                 }
             } catch (InterruptedException e) {
                 log.error("[DCL] 獲取鎖執行緒被中斷: {}", e.getMessage(), e);

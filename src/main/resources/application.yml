@@ -90,3 +90,18 @@ axon:
     general: jackson         # 全域預設使用的序列化工具指定為 Jackson (JSON)
     events: jackson          # 事件儲存序列化工具指定為 Jackson
     messages: jackson        # 系統指令與查詢訊息序列化工具指定為 Jackson
+
+# =========================================================================
+# 6. Actuator & Prometheus 監控指標配置
+# =========================================================================
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, prometheus
+  metrics:
+    tags:
+      application: kafka-cqrs-demo
+    export:
+      prometheus:
+        enabled: true

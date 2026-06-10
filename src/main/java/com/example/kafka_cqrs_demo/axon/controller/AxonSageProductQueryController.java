@@ -30,11 +30,14 @@ public class AxonSageProductQueryController {
 
     private final RedissonClient redissonClient;
     private final AxonInventoryRepository inventoryRepository;
+    private final io.micrometer.core.instrument.MeterRegistry meterRegistry;
 
     public AxonSageProductQueryController(RedissonClient redissonClient,
-                                           AxonInventoryRepository inventoryRepository) {
+                                           AxonInventoryRepository inventoryRepository,
+                                           io.micrometer.core.instrument.MeterRegistry meterRegistry) {
         this.redissonClient = redissonClient;
         this.inventoryRepository = inventoryRepository;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -57,7 +60,9 @@ public class AxonSageProductQueryController {
         String stockVal = stockBucket.get();
         String reservedVal = reservedBucket.get();
 
-        if (stockVal == null) {
+        if (stockVal != null) {
+            meterRegistry.counter("cache.requests", "type", "product", "result", "hit").increment();
+        } else {
             // 2. 獲取 Redis 分散式鎖，防範快取擊穿
             String lockKey = "lock:product:query:" + productId;
             RLock lock = redissonClient.getLock(lockKey);
@@ -90,12 +95,14 @@ public class AxonSageProductQueryController {
 
                             log.info("[DCL-Product] 從 MySQL 讀取成功並已回寫 Redis 快取 (是否為熱商品: {}, TTL: {} {}): {}",
                                     isHot, ttl, timeUnit, productId);
+                            meterRegistry.counter("cache.requests", "type", "product", "result", "miss").increment();
                         } else {
                             log.warn("[DCL-Product] 商品不存在，ID: {}", productId);
                             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
                         }
                     } else {
                         log.info("[DCL-Product] 雙重檢查命中商品快取 (Double-Checked Cache Hit): {}", productId);
+                        meterRegistry.counter("cache.requests", "type", "product", "result", "hit").increment();
                     }
                 } else {
                     // 獲取鎖超時，退避並嘗試重新讀取 Redis
@@ -106,6 +113,7 @@ public class AxonSageProductQueryController {
                     if (stockVal == null) {
                         return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
                     }
+                    meterRegistry.counter("cache.requests", "type", "product", "result", "hit").increment();
                 }
             } catch (InterruptedException e) {
                 log.error("[DCL-Product] 獲取鎖執行緒被中斷: {}", e.getMessage(), e);

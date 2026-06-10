@@ -10,6 +10,8 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -41,10 +43,16 @@ public class OutboxService {
 
     public OutboxService(OutboxRepository outboxRepository,
                          KafkaTemplate<String, String> kafkaTemplate,
-                         ObjectMapper objectMapper) {
+                         ObjectMapper objectMapper,
+                         MeterRegistry meterRegistry) {
         this.outboxRepository = outboxRepository;
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper;
+
+        // 註冊 Prometheus 自訂 Gauge 指標，監控發件箱積壓量
+        Gauge.builder("outbox_pending_count", outboxRepository, repo -> repo.countByStatus("PENDING"))
+                .description("Number of pending messages in the Outbox table")
+                .register(meterRegistry);
     }
 
     /**

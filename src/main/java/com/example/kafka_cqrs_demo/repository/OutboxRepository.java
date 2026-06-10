@@ -22,4 +22,12 @@ public interface OutboxRepository extends JpaRepository<OutboxEntity, String> {
      * @return 待處理的 Outbox 列表 (最多 50 筆)
      */
     List<OutboxEntity> findTop50ByStatusOrderByCreateTimeAsc(String status);
+
+    /**
+     * 計算指定狀態的發件箱紀錄數量，用於 Prometheus 監控指標。
+     *
+     * @param status 狀態 (例如 PENDING)
+     * @return 數量
+     */
+    long countByStatus(String status);
 }
