@@ -9,11 +9,16 @@ import com.example.kafka_cqrs_demo.entity.AxonStockReservationEntity;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.Optional;
+import java.util.UUID;
+import com.example.kafka_cqrs_demo.entity.AxonDlqMessageEntity;
+import com.example.kafka_cqrs_demo.axon.repository.AxonDlqMessageRepository;
 
 /**
  * 庫存非同步同步消費者 (Inventory Sync Consumer)
@@ -29,13 +34,16 @@ public class InventorySyncConsumer {
 
     private final AxonInventoryRepository inventoryRepository;
     private final AxonStockReservationRepository reservationRepository;
+    private final AxonDlqMessageRepository dlqMessageRepository;
     private final ObjectMapper objectMapper;
 
     public InventorySyncConsumer(AxonInventoryRepository inventoryRepository,
                                  AxonStockReservationRepository reservationRepository,
+                                 AxonDlqMessageRepository dlqMessageRepository,
                                  ObjectMapper objectMapper) {
         this.inventoryRepository = inventoryRepository;
         this.reservationRepository = reservationRepository;
+        this.dlqMessageRepository = dlqMessageRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -77,13 +85,29 @@ public class InventorySyncConsumer {
     }
 
     /**
-     * 監聽死信佇列 (DLQ)，模擬發送警報簡訊通知工程師人工排查。
+     * 監聽死信佇列 (DLQ)，模擬發送警報簡訊並持久化記錄於資料庫中以支援一鍵重試。
      *
      * @param message 進入死信佇列的原始訊息內容
+     * @param exceptionMessage 失敗例外原因說明
+     * @param originalTopic 原始訊息發送的主題
      */
     @KafkaListener(topics = InventoryKafkaConfig.INVENTORY_SYNC_DLQ_TOPIC, groupId = "inventory-dlq-group")
-    public void consumeDlq(String message) {
-        log.error("[ALERT] [SMS GATEWAY] 警報：庫存同步訊息進入死信佇列 (DLQ)！已發送簡訊通知工程師人工排查。訊息內容: {}", message);
+    @Transactional
+    public void consumeDlq(String message,
+                           @Header(name = KafkaHeaders.DLT_EXCEPTION_MESSAGE, required = false) String exceptionMessage,
+                           @Header(name = KafkaHeaders.DLT_ORIGINAL_TOPIC, required = false) String originalTopic) {
+        log.error("[ALERT] [SMS GATEWAY] 警報：庫存同步訊息進入死信佇列 (DLQ)！已發送簡訊通知工程師人工排查。訊息內容: {}, 錯誤原因: {}", message, exceptionMessage);
+
+        // 將死信訊息寫入 MySQL 以供重試與審計
+        AxonDlqMessageEntity dlqMessage = new AxonDlqMessageEntity(
+                UUID.randomUUID().toString(),
+                message,
+                originalTopic != null ? originalTopic : InventoryKafkaConfig.INVENTORY_SYNC_TOPIC,
+                exceptionMessage != null ? (exceptionMessage.length() > 500 ? exceptionMessage.substring(0, 500) : exceptionMessage) : "未知處理異常",
+                "PENDING",
+                LocalDateTime.now()
+        );
+        dlqMessageRepository.save(dlqMessage);
     }
 
     private void handleReserve(InventorySyncEvent event) {

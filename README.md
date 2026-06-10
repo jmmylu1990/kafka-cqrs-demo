@@ -33,10 +33,11 @@
 * **Saga 分散式持久化超時與自癒機制 (Saga Timeout & Lifecycle Management)**：
   * **超時自癒**：在 `OrderSaga` 中引入 `DeadlineManager`。在新訂單建立時，自動向資料庫註冊一個 15 分鐘的 `payment-deadline` 超時任務。若 15 分鐘內未收到付款確認事件，將自動觸發超時補償機制，釋放預留庫存並取消訂單。
   * **分散式持久化**：重構為基於 MySQL `QRTZ_*` 表格的 **`QuartzDeadlineManager`**。即使服務在此期間斷電、重啟或有多個執行個體部署，超時任務也不會遺失，且能在重啟時精確補償，確保資料的一致性與系統的自癒力。
-* **Kafka 消費端異常重試與死信佇列 (DLQ)**：
-  * **通用異常處理器**：配置 Spring Kafka `CommonErrorHandler`，針對資料庫連線、併發鎖衝突等暫時性異常，自動進行 3 次重試（間隔 1 秒）。重試失敗後，將訊息投遞到 `inventory-sync-events.DLQ`。
+* **Kafka 消費端異常重試與死信佇列持久化與一鍵重試自癒 (DLQ Reprocessing & Management API)**：
+  * **通用異常處理器**：配置 Spring Kafka `CommonErrorHandler`，結合自訂 `DeadLetterPublishingRecoverer` 目的地解析器。針對資料庫連線、樂觀鎖衝突等暫時性異常，自動進行 3 次重試（間隔 1 秒）。重試失敗後，將訊息投遞到 `inventory-sync-events.DLQ` 分割區 0，解決分割區數量不對等的 Destination resolver 警告。
   * **快速失敗與死信**：將 JSON 反序列化解析錯誤 (JsonProcessingException) 設定為不可重試異常，略過重試直接送入死信佇列。
-  * **警報通知**：設有 DLQ 監聽器，一旦訊息降級進入死信，模擬發送警報簡訊通知工程師人工介入。
+  * **死信落庫與警報**：設有 DLQ 監聽器，一旦訊息降級進入死信，除了模擬發送簡訊警報，亦會將死信內容持久化寫入 `t_axon_dlq_message` 資料表中，初始狀態為 `PENDING`。
+  * **一鍵重試自癒 API**：提供 `POST /axonsaga/api/dlq/reprocess` 端點。當管理員觸發此 API 時，會從資料庫撈取所有 `PENDING` 死信，解析 JSON 以 `productId` 作為 Partition Key，重新投遞回主要主題 `inventory-sync-events`，保證同商品事件的順序性。重處理成功後，將死信狀態變更為 `REPROCESSED`。
 * **模擬外部金流防腐層 (PaymentAdapter/ACL)**：
   * 移除本地資料庫強耦合，解耦為獨立外部金流 API (`MockExternalPaymentController`)。
   * `PaymentAdapter` 扮演防腐層，透過 HTTP REST API 請求外部扣款/退款，將結果轉譯為 Axon 事件推動 Saga。
@@ -81,6 +82,14 @@ Axon 模組使用以下 MySQL 表格進行狀態儲存：
    * `type` (VARCHAR, DEBIT/REFUND)
    * `status` (VARCHAR, SUCCESS/FAILED)
    * `create_time` (DATETIME)
+
+6. **t_axon_dlq_message (死信佇列持久化表)**
+   * `id` (VARCHAR, 主鍵，UUID)
+   * `message_content` (TEXT, 原始 Kafka 訊息 JSON 負載)
+   * `topic` (VARCHAR, 原始發送主題)
+   * `error_message` (VARCHAR, 錯誤原因，長度防禦限制 500)
+   * `status` (VARCHAR, 狀態: PENDING / REPROCESSED / FAILED)
+   * `create_time` (DATETIME, 進入死信資料表的時間)
 
 ---
 
@@ -411,13 +420,53 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
   [InventorySyncConsumer] 收到庫存同步 Kafka 訊息: {"orderId":"...","productId":"PROD-DLQ-TEST",...}
   [InventorySyncConsumer] 收到庫存同步 Kafka 訊息: {"orderId":"...","productId":"PROD-DLQ-TEST",...}
   ```
-  3 次重試皆失敗後，訊息會被自動投遞至預設的死信主題 `inventory-sync-events-dlt`：
+  3 次重試皆失敗後，訊息會被自動投遞至死信主題 `inventory-sync-events.DLQ` 分割區 0，並觸發專屬的 DLQ 簡訊警報監聽器並寫入資料庫：
   ```text
-  WARN 19866 --- [kafka-cqrs-demo] [ntainer#0-0-C-1] o.s.k.l.DeadLetterPublishingRecoverer    : Destination resolver returned non-existent partition inventory-sync-events-dlt-2, KafkaProducer will determine partition to use for this topic
+  [ALERT] [SMS GATEWAY] 警報：庫存同步訊息進入死信佇列 (DLQ)！已發送簡訊通知工程師人工排查。訊息內容: {"orderId":"...","productId":"PROD-DLQ-TEST",...}, 錯誤原因: ...
   ```
 
-* **備註**：
-  * 在 [InventoryKafkaConfig.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/axon/config/InventoryKafkaConfig.java) 中，我們另外編寫並註解保留了自訂目的地的 `TopicPartition` 轉發解析器。若將該區塊取消註解，死信會被強制送至 `inventory-sync-events.DLQ` 分區 0，進而能直接觸發專屬的 DLQ 簡訊警報監聽器並印出 `[ALERT] [SMS GATEWAY] 警報...` 的警報日誌。
+### 3. 測試「死信佇列一鍵重試自癒」（Reprocessing API）
+當死信被寫入資料庫後，我們可以透過 Reprocessing API 觸發重試。
+
+* **模擬數據庫修復（重要）**：
+  在進行一鍵重試前，必須先模擬連線修復。請將 [InventorySyncConsumer.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/axon/service/InventorySyncConsumer.java) 內模擬拋出例外的代碼註解掉（在 `consume` 方法中）：
+  ```java
+  // if ("RESERVE".equals(event.getActionType()) && "PROD-DLQ-TEST".equals(event.getProductId())) {
+  //     throw new RuntimeException("模擬資料庫暫時性連線失敗");
+  // }
+  ```
+  *(修改存檔後，請重啟 Spring Boot 服務以載入最新程式碼)*
+
+* **呼叫一鍵重試 API**：
+  向重處理端點發送 POST 請求：
+  ```bash
+  curl --location --request POST 'http://localhost:8081/axonsaga/api/dlq/reprocess'
+  ```
+
+* **驗證 API 回傳結果**：
+  回傳 JSON 將包含重試成功的死信 ID 與對應的產品 ID：
+  ```json
+  {
+      "success": true,
+      "reprocessedCount": 1,
+      "details": [
+          "成功重試死信 ID [xxxx-xxxx-xxxx-xxxx]: orderId=xxxx, productId=PROD-DLQ-TEST, 轉發至 Topic=inventory-sync-events"
+      ],
+      "message": "死信重處理執行完成"
+   }
+  ```
+
+* **驗證落庫與資料庫狀態變更**：
+  1. 控制台日誌顯示，消費者成功接收並解析此重處理訊息，無報錯且成功寫入 MySQL 預留記錄：
+     ```text
+     [InventorySyncConsumer] 解析事件成功: orderId=xxxx, action=RESERVE
+     [InventorySyncConsumer] MySQL 已建立預留記錄: orderId=xxxx
+     ```
+  2. 查詢死信資料表，確認該筆死信的狀態已更新為 `REPROCESSED`：
+     ```sql
+     SELECT id, status FROM my_database.t_axon_dlq_message;
+     ```
+     預期該筆資料的 `status` 欄位已變更為 `REPROCESSED`。
 
 ---
 

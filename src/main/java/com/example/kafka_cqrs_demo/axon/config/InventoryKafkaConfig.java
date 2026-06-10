@@ -66,14 +66,9 @@ public class InventoryKafkaConfig {
      */
     @Bean
     public CommonErrorHandler kafkaErrorHandler(KafkaTemplate<Object, Object> kafkaTemplate) {
-        // 建立死信轉發器
-        DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(kafkaTemplate);
-
-        /*
         // 建立死信轉發器，指定目標 Topic 爲 INVENTORY_SYNC_DLQ_TOPIC，並發送到 partition 0 (避免因 DLQ 分區數較少而發生 non-existent partition 警告)
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(kafkaTemplate,
                 (record, exception) -> new TopicPartition(INVENTORY_SYNC_DLQ_TOPIC, 0));
-        */
         
         // 設定重試策略：最大重試 3 次，每次間隔 1000 毫秒
         FixedBackOff backOff = new FixedBackOff(1000L, 3L);
