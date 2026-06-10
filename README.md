@@ -38,9 +38,12 @@
   * **快速失敗與死信**：將 JSON 反序列化解析錯誤 (JsonProcessingException) 設定為不可重試異常，略過重試直接送入死信佇列。
   * **死信落庫與警報**：設有 DLQ 監聽器，一旦訊息降級進入死信，除了模擬發送簡訊警報，亦會將死信內容持久化寫入 `t_axon_dlq_message` 資料表中，初始狀態為 `PENDING`。
   * **一鍵重試自癒 API**：提供 `POST /axonsaga/api/dlq/reprocess` 端點。當管理員觸發此 API 時，會從資料庫撈取所有 `PENDING` 死信，解析 JSON 以 `productId` 作為 Partition Key，重新投遞回主要主題 `inventory-sync-events`，保證同商品事件的順序性。重處理成功後，將死信狀態變更為 `REPROCESSED`。
-* **模擬外部金流防腐層 (PaymentAdapter/ACL)**：
-  * 移除本地資料庫強耦合，解耦為獨立外部金流 API (`MockExternalPaymentController`)。
-  * `PaymentAdapter` 扮演防腐層，透過 HTTP REST API 請求外部扣款/退款，將結果轉譯為 Axon 事件推動 Saga。
+* **模擬外部金流防腐層 (PaymentAdapter/ACL) 與超時/失敗自癒重試機制**：
+  * **金流解耦**：移除本地資料庫強耦合，解耦為獨立外部金流 API (`MockExternalPaymentController`)。
+  * **連線超時與扣款重試**：`PaymentAdapter` 透過具備 3 秒 Timeout 防護的 RestTemplate 請求外部扣款，若因網路抖動或超時發生 `RestClientException`，透過 **Spring Retry** 自動進行最多 3 次的指數退避重試 (1s -> 2s -> 4s)。若重試全部失敗，則觸發降級方法發布扣款失敗事件，引導 Saga 執行自動庫存釋放與訂單取消。
+  * **假性失敗自癒**：Saga 協調取消訂單時，防腐層會再次比對外部實際扣款交易流水（等冪性），若發現先前超時的扣款請求其實已在外部成功執行（假性失敗），將自動發起退款補償，保障資金流一致性。
+  * **退款補償重試佇列**：當外部退款因服務故障回傳 500 錯誤或發生連線異常時，自動將退款任務持久化寫入 MySQL **`t_payment_refund_retry_task`** 表中（初始為 `PENDING`），交由定時排程器 `RefundRetryScheduler` 進行自癒重試。
+  * **背景退避重試與最高警報**：排程器每 10 秒執行一次，對待處理任務發起重試並採用指數退避算法 (30s * 2^retryCount) 計算下一次重試時間。若重試 5 次上限仍失敗，則將狀態設為 `FAILED` 並發布最高優先級警報日誌，供工程師手動介入。
 
 ---
 
@@ -91,6 +94,18 @@ Axon 模組使用以下 MySQL 表格進行狀態儲存：
    * `status` (VARCHAR, 狀態: PENDING / REPROCESSED / FAILED)
    * `create_time` (DATETIME, 進入死信資料表的時間)
 
+7. **t_payment_refund_retry_task (退款失敗重試任務表)**
+   * `id` (VARCHAR, 主鍵，UUID)
+   * `user_id` (VARCHAR)
+   * `order_id` (VARCHAR)
+   * `amount` (BIGINT)
+   * `retry_count` (INT, 當前已重試次數)
+   * `status` (VARCHAR, 狀態: PENDING / SUCCESS / FAILED)
+   * `last_error_message` (VARCHAR, 最後錯誤原因，長度防禦限制 200)
+   * `next_retry_time` (DATETIME, 下一次重試執行的時間點)
+   * `create_time` (DATETIME)
+   * `update_time` (DATETIME)
+
 ---
 
 ## 測試重置步驟 (Reset Environment)
@@ -106,6 +121,8 @@ TRUNCATE TABLE t_axon_stock_reservation;
 TRUNCATE TABLE t_axon_inventory;
 TRUNCATE TABLE t_axon_wallet;
 TRUNCATE TABLE t_axon_wallet_transaction;
+TRUNCATE TABLE t_axon_dlq_message;
+TRUNCATE TABLE t_payment_refund_retry_task;
 TRUNCATE TABLE domain_event_entry;
 TRUNCATE TABLE token_entry;
 TRUNCATE TABLE saga_entry;

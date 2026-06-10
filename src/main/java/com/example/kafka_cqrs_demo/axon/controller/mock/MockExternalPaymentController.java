@@ -10,8 +10,11 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 模擬外部金流平台 REST 控制器 (Mock External Payment Controller)
@@ -29,10 +32,45 @@ public class MockExternalPaymentController {
     private final AxonWalletRepository walletRepository;
     private final AxonWalletTransactionRepository transactionRepository;
 
+    // 故障模擬控制變數
+    private final AtomicBoolean debitTimeoutEnabled = new AtomicBoolean(false);
+    private final AtomicBoolean refundFailureEnabled = new AtomicBoolean(false);
+
     public MockExternalPaymentController(AxonWalletRepository walletRepository,
                                          AxonWalletTransactionRepository transactionRepository) {
         this.walletRepository = walletRepository;
         this.transactionRepository = transactionRepository;
+    }
+
+    /**
+     * 啟用或關閉扣款超時模擬
+     */
+    @PostMapping("/control/debit-timeout")
+    public ResponseEntity<String> controlDebitTimeout(@RequestParam boolean enable) {
+        debitTimeoutEnabled.set(enable);
+        log.info("[MockExternalAPI] 控制端點設定扣款超時模擬為: {}", enable);
+        return ResponseEntity.ok("設定成功，debit-timeout: " + enable);
+    }
+
+    /**
+     * 啟用或關閉退款隨機失敗模擬
+     */
+    @PostMapping("/control/refund-fail")
+    public ResponseEntity<String> controlRefundFail(@RequestParam boolean enable) {
+        refundFailureEnabled.set(enable);
+        log.info("[MockExternalAPI] 控制端點設定退款失敗模擬為: {}", enable);
+        return ResponseEntity.ok("設定成功，refund-fail: " + enable);
+    }
+
+    /**
+     * 查詢當前故障模擬開關狀態
+     */
+    @GetMapping("/control/status")
+    public ResponseEntity<Map<String, Boolean>> getControlStatus() {
+        Map<String, Boolean> status = new HashMap<>();
+        status.put("debitTimeoutEnabled", debitTimeoutEnabled.get());
+        status.put("refundFailureEnabled", refundFailureEnabled.get());
+        return ResponseEntity.ok(status);
     }
 
     /**
@@ -42,6 +80,16 @@ public class MockExternalPaymentController {
     public ResponseEntity<PaymentResponse> debit(@RequestBody PaymentRequest request) {
         log.info("[MockExternalAPI] 收到 HTTP 扣款請求: userId={}, orderId={}, amount={}",
                 request.getUserId(), request.getOrderId(), request.getAmount());
+
+        // 模擬超時：延遲 5 秒以觸發呼叫端 RestTemplate 的 3 秒 Timeout 機制
+        if (debitTimeoutEnabled.get()) {
+            log.warn("[MockExternalAPI] 偵測到扣款超時模擬開啟，準備延遲 5 秒以觸發呼叫端 Timeout...");
+            try {
+                Thread.sleep(5000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
 
         // 1. 等冪性檢查
         Optional<AxonWalletTransactionEntity> existTx = transactionRepository
@@ -91,6 +139,12 @@ public class MockExternalPaymentController {
     public ResponseEntity<PaymentResponse> refund(@RequestBody PaymentRequest request) {
         log.info("[MockExternalAPI] 收到 HTTP 退款請求: userId={}, orderId={}, amount={}",
                 request.getUserId(), request.getOrderId(), request.getAmount());
+
+        // 模擬退款故障：直接回傳 HTTP 500 狀態碼
+        if (refundFailureEnabled.get()) {
+            log.warn("[MockExternalAPI] 偵測到退款失敗模擬開啟，直接返回 HTTP 500 錯誤...");
+            return ResponseEntity.status(500).body(new PaymentResponse(false, "模擬外部退款異常(伺服器錯誤)"));
+        }
 
         // 1. 等冪性檢查
         Optional<AxonWalletTransactionEntity> existTx = transactionRepository
