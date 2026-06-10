@@ -60,6 +60,14 @@ public class AxonDatabaseInitializer implements CommandLineRunner {
         redisTemplate.opsForValue().set("product:PROD-003:stock", "0");
         redisTemplate.opsForValue().set("product:PROD-003:reserved", "0");
 
+        // PROD-DLQ-TEST
+        if (!inventoryRepository.existsById("PROD-DLQ-TEST")) {
+            inventoryRepository.save(new AxonInventoryEntity("PROD-DLQ-TEST", 100, 0));
+            log.info("[AxonDatabaseInitializer] 插入測試商品 PROD-DLQ-TEST: 庫存 100 件");
+        }
+        redisTemplate.opsForValue().set("product:PROD-DLQ-TEST:stock", "100");
+        redisTemplate.opsForValue().set("product:PROD-DLQ-TEST:reserved", "0");
+
         log.info("[AxonDatabaseInitializer] 開始初始化 Axon 錢包測試數據...");
 
         if (!walletRepository.existsById("USER-001")) {

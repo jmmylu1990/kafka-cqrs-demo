@@ -386,21 +386,32 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
   ```
 
 ### 2. 測試「暫時性資料庫異常」（重試 3 次後進入 DLQ）
-* **人為製造臨時異常**：
-  請在 [InventorySyncConsumer.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/axon/service/InventorySyncConsumer.java) 的 `handleReserve` 方法（約第 77 行）中，臨時加入一行代碼：
-  ```java
-  throw new RuntimeException("模擬暫時性資料庫連線超時！");
+本專案已在系統中內建了針對特定測試商品 `PROD-DLQ-TEST` 的資料庫連線失敗異常模擬。此商品在系統啟動時已由 [AxonDatabaseInitializer.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/axon/config/AxonDatabaseInitializer.java) 自動初始化（設定 100 件可用庫存），供隨時測試。
+
+* **發送針對測試商品的下單請求**：
+  ```bash
+  curl --location 'http://localhost:8081/axonsaga/api/orders' \
+  --header 'Content-Type: application/json' \
+  --data '{
+      "productId": "PROD-DLQ-TEST",
+      "quantity": 2,
+      "price": 100,
+      "userId": "USER-001"
+  }'
   ```
-* **發送一次正常的下單請求**（同上方建立訂單的 curl 指令）。
+
 * **驗證控制台日誌**：
-  您會看到消費端連續印出 3 次重試日誌（每次間隔約 1 秒）：
+  此時 Redis 庫存預留會成功，並向 Kafka 發送落庫同步事件。在 [InventorySyncConsumer.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/axon/service/InventorySyncConsumer.java) 接收到該事件後，會觸發模擬的資料庫連線異常，並在控制台印出 3 次重試日誌（共消費 4 次，每次間隔約 1 秒）：
   ```text
-  [InventorySyncConsumer] 收到庫存同步 Kafka 訊息... (第 1 次嘗試)
-  [InventorySyncConsumer] 收到庫存同步 Kafka 訊息... (第 2 次嘗試)
-  [InventorySyncConsumer] 收到庫存同步 Kafka 訊息... (第 3 次嘗試)
+  [InventorySyncConsumer] 收到庫存同步 Kafka 訊息: {"orderId":"...","productId":"PROD-DLQ-TEST",...}
+  [InventorySyncConsumer] 收到庫存同步 Kafka 訊息: {"orderId":"...","productId":"PROD-DLQ-TEST",...}
+  [InventorySyncConsumer] 收到庫存同步 Kafka 訊息: {"orderId":"...","productId":"PROD-DLQ-TEST",...}
+  [InventorySyncConsumer] 收到庫存同步 Kafka 訊息: {"orderId":"...","productId":"PROD-DLQ-TEST",...}
   ```
-  3 次重試都失敗後，訊息被自動投遞到 DLQ，觸發警報監聽器：
+  3 次重試皆失敗後，訊息會被自動投遞至預設的死信主題 `inventory-sync-events-dlt`：
   ```text
-  [ALERT] [SMS GATEWAY] 警報：庫存同步訊息進入死信佇列 (DLQ)！已發送簡訊通知工程師人工排查。訊息內容: {"orderId":"...","productId":"PROD-001",...}
+  WARN 19866 --- [kafka-cqrs-demo] [ntainer#0-0-C-1] o.s.k.l.DeadLetterPublishingRecoverer    : Destination resolver returned non-existent partition inventory-sync-events-dlt-2, KafkaProducer will determine partition to use for this topic
   ```
-* **測試完畢後**：請記得刪除或註解掉臨時加入的 `throw new RuntimeException("...")` 代碼。
+
+* **備註**：
+  * 在 [InventoryKafkaConfig.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/axon/config/InventoryKafkaConfig.java) 中，我們另外編寫並註解保留了自訂目的地的 `TopicPartition` 轉發解析器。若將該區塊取消註解，死信會被強制送至 `inventory-sync-events.DLQ` 分區 0，進而能直接觸發專屬的 DLQ 簡訊警報監聽器並印出 `[ALERT] [SMS GATEWAY] 警報...` 的警報日誌。

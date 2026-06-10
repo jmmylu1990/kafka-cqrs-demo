@@ -51,6 +51,11 @@ public class InventorySyncConsumer {
 
         // 不在此處捕捉 DB/業務異常，讓異常向上拋出以觸發 Spring Kafka 重試與 DLQ 流程
         InventorySyncEvent event = objectMapper.readValue(message, InventorySyncEvent.class);
+
+        // 模擬資料庫暫時性連線失敗異常，用於驗證重試與 DLQ (僅對特定測試商品 PROD-DLQ-TEST 觸發)
+        if ("RESERVE".equals(event.getActionType()) && "PROD-DLQ-TEST".equals(event.getProductId())) {
+            throw new RuntimeException("模擬資料庫暫時性連線失敗");
+        }
         log.info("[InventorySyncConsumer] 解析事件成功: orderId={}, action={}", event.getOrderId(), event.getActionType());
 
         switch (event.getActionType()) {
