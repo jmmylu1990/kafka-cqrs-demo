@@ -9,6 +9,7 @@ import com.example.kafka_cqrs_demo.axon.event.StockFailedEvent;
 import com.example.kafka_cqrs_demo.axon.event.StockReservedEvent;
 import com.example.kafka_cqrs_demo.axon.repository.AxonInventoryRepository;
 import com.example.kafka_cqrs_demo.axon.repository.AxonStockReservationRepository;
+import com.example.kafka_cqrs_demo.entity.AxonInventoryEntity;
 import com.example.kafka_cqrs_demo.entity.AxonStockReservationEntity;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -97,11 +98,21 @@ public class InventoryService {
                 RBucket<String> reservedBucket = redissonClient.getBucket(reservedKey, StringCodec.INSTANCE);
                 RMap<String, String> orderResMap = redissonClient.getMap(orderResKey, StringCodec.INSTANCE);
 
-                // 1. 檢查商品是否存在
+                // 1. 檢查商品是否存在於 Redis，若不存在則從 MySQL 載入 (DCL，由當前商品鎖保證安全)
                 if (!stockBucket.isExists()) {
-                    log.warn("[InventoryService] 預留失敗：商品 {} 在 Redis 中不存在", productId);
-                    eventGateway.publish(new StockFailedEvent(orderId, "商品不存在"));
-                    return;
+                    log.info("[InventoryService] Redis 中找不到商品 {} 的庫存，嘗試從 MySQL 載入 (DCL)", productId);
+                    Optional<AxonInventoryEntity> inventoryOpt = inventoryRepository.findById(productId);
+                    if (inventoryOpt.isPresent()) {
+                        AxonInventoryEntity dbInventory = inventoryOpt.get();
+                        stockBucket.set(String.valueOf(dbInventory.getStock()));
+                        reservedBucket.set(String.valueOf(dbInventory.getReservedStock()));
+                        log.info("[InventoryService] 成功從 MySQL 載入商品 {} 的庫存至 Redis (庫存: {}, 預留: {})",
+                                productId, dbInventory.getStock(), dbInventory.getReservedStock());
+                    } else {
+                        log.warn("[InventoryService] 預留失敗：商品 {} 在 MySQL 與 Redis 中皆不存在", productId);
+                        eventGateway.publish(new StockFailedEvent(orderId, "商品不存在"));
+                        return;
+                    }
                 }
 
                 // 2. 檢查可用庫存是否充足

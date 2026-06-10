@@ -47,6 +47,9 @@
 * **Axon 事件快照機制 (Event Store Snapshotting)**：
   * **快照觸發**：配置 `SnapshotTriggerDefinition` 並關聯訂單聚合根 `AxonSagaOrderAggregate`，將快照事件數閾值設定為 2。當該聚合實體累積產生的歷史事件達到 2 筆時（例如完成「訂單建立」與「庫存預留」），系統會自動非同步觸發快照生成。
   * **快照持久化與還原**：產生的快照將序列化並儲存至資料庫的 `snapshot_event_entry` 表。後續加載聚合時，Axon 會直接讀取最新快照還原聚合狀態，並僅復原/重放快照之後產生的增量事件，大幅度降低隨歷史事件流增長而帶來的聚合重建延遲與資料庫讀取開銷。
+* **防範快取擊穿與動態快取載入 (Double-Checked Locking / DCL)**：
+  * **防快取擊穿**：在訂單與商品查詢端實作 Double-Checked Locking 機制，當 Redis 快取未命中時，使用 Redisson 分散式鎖進行併發防護，確保只有一個執行緒去 MySQL 查詢並回寫 Redis，避免海量請求同時穿透資料庫。
+  * **冷商品動態載入**：在庫存預留端 (Command Side)，若 Redis 快取未命中（模擬冷商品），自動在商品鎖的保護下進行 DCL 載入，將 MySQL 的最新庫存與預留數據同步至 Redis，保證冷商品也能順利下單，為商品的冷熱分離提供底層支持。
 
 ---
 
@@ -591,3 +594,57 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
   ```
 * **驗證日誌輸出**：
   在服務控制台日誌中，您會看到 Axon 嘗試重建聚合時，會從快照載入而不是從頭重放所有事件。
+
+---
+
+## ⚡ 防範快取擊穿 (Double-Checked Locking) 驗證流程
+
+本測試驗證：商品與訂單在快取未命中時，透過 Double-Checked Locking (DCL) 機制，是否能安全地阻止多個請求穿透至 MySQL。同時，也驗證了當訂單扣庫面臨「冷商品」時，是否能透過 DCL 動態將商品庫存載入 Redis，避免下單失敗。
+
+### 1. 驗證商品庫存查詢 DCL
+* **清除快取**：
+  ```bash
+  docker exec cqrs-redis redis-cli DEL product:PROD-001:stock product:PROD-001:reserved product:PROD-001:updatedAt
+  ```
+* **發送查詢請求**：
+  ```bash
+  curl -i http://localhost:8081/axonsaga/api/products/PROD-001/stock
+  ```
+* **驗證日誌輸出**：
+  在快取未命中時，會輸出以下日誌：
+  ```text
+  [DCL-Product] Redis 快取未命中且已獲取鎖，嘗試從 MySQL 查詢商品: PROD-001
+  [DCL-Product] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 30分鐘): PROD-001
+  ```
+  後續重複查詢時，控制台將不再印出 MySQL 查詢日誌，而是直接由 Redis 返回。
+
+### 2. 驗證下單時「冷商品庫存動態載入（DCL）」
+* **清除快取（模擬冷商品不在 Redis 中）**：
+  ```bash
+  docker exec cqrs-redis redis-cli DEL product:PROD-002:stock product:PROD-002:reserved
+  ```
+* **發送下單請求**（購買 2 件 `PROD-002`）：
+  ```bash
+  curl -i --location 'http://localhost:8081/axonsaga/api/orders' \
+  --header 'Content-Type: application/json' \
+  --data '{"productId": "PROD-002","quantity": 2,"price": 10,"userId": "USER-001"}'
+  ```
+* **驗證日誌輸出**：
+  Saga 執行庫存預留時，會攔截 Cache Miss，並自動從 MySQL 載入庫存至 Redis，訂單隨即順利建立：
+  ```text
+  [InventoryService] Redis 中找不到商品 PROD-002 的庫存，嘗試從 MySQL 載入 (DCL)
+  [InventoryService] 成功從 MySQL 載入商品 PROD-002 的庫存至 Redis (庫存: 5, 預留: 0)
+  [InventoryService] Redisson 庫存預留成功，扣除產品 PROD-002 可用庫存 2 件，轉為預留狀態
+  ```
+
+### 3. 驗證訂單詳情查詢 DCL
+在上一步下單成功後，訂單狀態變更會觸發 Projector 刪除訂單快取以防髒數據。
+* **發送查詢詳情請求**（請代入上一步回傳的 `orderId`）：
+  ```bash
+  curl -i http://localhost:8081/axonsaga/api/orders/{orderId}
+  ```
+* **驗證日誌輸出**：
+  ```text
+  [DCL] Redis 快取未命中且已獲取鎖，嘗試從 MySQL 查詢: {orderId}
+  [DCL] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 1 天): {orderId}
+  ```
