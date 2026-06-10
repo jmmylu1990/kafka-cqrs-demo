@@ -58,6 +58,67 @@
   * **分類預熱**：MySQL `t_axon_inventory` 表新增 `is_hot` 標記。啟動時僅預熱 `is_hot = true` 的熱商品（如 `PROD-001`）到 Redis，配置 **1 天 TTL**；冷商品預設不在 Redis 中。
   * **動態短效快取**：當冷商品被查詢或下單觸發 DCL 載入時，在 Redis 中設定短效 **60 秒 TTL**，無人訪問時自動過期，大幅釋放 Redis 記憶體壓力。
   * **更新時 TTL 保護**：在庫存異動時（如預留、扣款、釋放），動態讀取 isHot 標記，更新 stock 與 reserved 時同步刷新對應的 TTL，防止覆蓋操作使冷商品快取永久化。
+* **庫存與預留對帳自癒機制 (Inventory & Reservation Reconciliation)**：
+  * **定時對帳與自癒**：實作了 `InventoryReconciliationJob`，預設每小時執行一次，比對 MySQL 與 Redis 中的可用庫存、預留庫存及訂單預留明細狀態。若發現兩者漂移不一致，會自動以 MySQL 作為唯一真實數據源 (Source of Truth)，執行自我修正與自癒並回寫 Redis。
+  * **手動對帳 API**：提供 `POST /axonsaga/api/inventory/reconcile` 端點，允許系統管理或運維人員手動一鍵觸發數據稽核與校正。
+  * **安全交易滑動窗口保護**：若商品或訂單在 5 分鐘內有交易異動，對帳排程將主動跳過該商品，以防覆寫 Kafka 異步同步中的數據。
+
+#### Axon Saga 分散式交易流程狀態圖 (Saga State Machine)
+```mermaid
+stateDiagram-v2
+    [*] --> CREATED: 訂單建立 (OrderCreatedEvent)
+    
+    state CREATED {
+        [*] --> 預留庫存: 發送 ReserveStockCommand
+        預留庫存 --> 預留成功: StockReservedEvent
+        預留庫存 --> 庫存不足: StockFailedEvent
+    }
+    
+    庫存不足 --> CANCELLED: 發送 CancelOrderCommand (狀態: 庫存不足)
+    
+    預留成功 --> PENDING_PAYMENT: 發送 ConfirmStockReservedCommand (啟動 15分 定時任務)
+    
+    state PENDING_PAYMENT {
+        [*] --> 等待付款
+        等待付款 --> 逾時未付: Deadline payment-deadline 觸發
+        等待付款 --> 收到付款請求: POST /{orderId}/pay -> ProcessPaymentCommand
+    }
+    
+    逾時未付 --> CANCELLED: 發送 CancelOrderCommand (狀態: 付款超時)
+    
+    收到付款請求 --> 金流扣款中: 發布 PaymentStartedEvent -> 發送 DebitWalletCommand
+    
+    state 金流扣款中 {
+        [*] --> 外部HTTP扣款
+        外部HTTP扣款 --> 扣款成功: WalletDebitedEvent
+        外部HTTP扣款 --> 扣款失敗: WalletDebitFailedEvent (如餘額不足 / 超時重試全失敗)
+    }
+    
+    扣款失敗 --> CANCELLED: 發送 CancelOrderCommand (狀態: 扣款失敗)
+    扣款成功 --> PAID: 發送 ConfirmPaymentCommand -> 發布 OrderPaidEvent
+    
+    PAID --> [*]: Saga 正常結束 (取消 Deadline 定時任務)
+    
+    CANCELLED --> 釋放與補償: 監聽 OrderCancelledEvent
+    
+    state 釋放與補償 {
+        [*] --> 檢查扣款紀錄
+        檢查扣款紀錄 --> 釋放Redis庫存: 未付款取消 (RELEASE)
+        檢查扣款紀錄 --> 釋放Redis與外部退款: 已扣款售後取消 (REFUND)
+        
+        state 釋放Redis與外部退款 {
+            [*] --> 呼叫外部Refund API
+            呼叫外部Refund API --> 退款成功: 發布 WalletRefundedEvent
+            呼叫外部Refund API --> 退款失敗: 寫入 t_payment_refund_retry_task
+        }
+    }
+    
+    退款成功 --> [*]: Saga 結束
+    退款失敗 --> 指數退避重試: Background RefundRetryScheduler (上限 5 次)
+    指數退避重試 --> [*]: 重試成功 / 5次失敗觸發最高警報 (人工作業)
+```
+
+
 
 ---
 
@@ -118,7 +179,7 @@ Axon 模組使用以下 MySQL 表格進行狀態儲存：
    * `amount` (BIGINT)
    * `retry_count` (INT, 當前已重試次數)
    * `status` (VARCHAR, 狀態: PENDING / SUCCESS / FAILED)
-   * `last_error_message` (VARCHAR, 最後錯誤原因，長度防禦限制 200)
+   * `last_error_message` (VARCHAR, 最後錯誤原因，資料庫欄位長度為 500，代碼內防禦性截斷為 200)
    * `next_retry_time` (DATETIME, 下一次重試執行的時間點)
    * `create_time` (DATETIME)
    * `update_time` (DATETIME)
@@ -159,6 +220,17 @@ TRUNCATE TABLE snapshot_event_entry;
 TRUNCATE TABLE token_entry;
 TRUNCATE TABLE saga_entry;
 TRUNCATE TABLE association_value_entry;
+TRUNCATE TABLE QRTZ_SIMPLE_TRIGGERS;
+TRUNCATE TABLE QRTZ_SIMPROP_TRIGGERS;
+TRUNCATE TABLE QRTZ_CRON_TRIGGERS;
+TRUNCATE TABLE QRTZ_BLOB_TRIGGERS;
+TRUNCATE TABLE QRTZ_FIRED_TRIGGERS;
+TRUNCATE TABLE QRTZ_TRIGGERS;
+TRUNCATE TABLE QRTZ_JOB_DETAILS;
+TRUNCATE TABLE QRTZ_CALENDARS;
+TRUNCATE TABLE QRTZ_PAUSED_TRIGGER_GRPS;
+TRUNCATE TABLE QRTZ_SCHEDULER_STATE;
+TRUNCATE TABLE QRTZ_LOCKS;
 SET FOREIGN_KEY_CHECKS = 1;
 ```
 
@@ -223,13 +295,9 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
   SELECT order_id, status, user_id FROM t_axon_order WHERE order_id = '{orderId}';
   ```
 
-#### 3. 對該訂單發送付款確認請求 (無須帶入 userId)
+#### 3. 對該訂單發送付款確認請求
 ```bash
-curl --location 'http://localhost:8081/axonsaga/api/orders/pay' \
---header 'Content-Type: application/json' \
---data '{
-    "orderId": "{orderId}"
-}'
+curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/{orderId}/pay'
 ```
 
 #### 4. 第二階段：檢查付款完成，預留庫存扣減，金額被扣除
@@ -274,11 +342,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 #### 2. 送出付款確認請求
 ```bash
-curl --location 'http://localhost:8081/axonsaga/api/orders/pay' \
---header 'Content-Type: application/json' \
---data '{
-    "orderId": "{orderId}"
-}'
+curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/{orderId}/pay?userId=USER-002'
 ```
 
 #### 3. 第三階段：檢查扣款失敗，庫存安全退回
@@ -310,12 +374,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders/pay' \
 
 #### 1. 發送取消請求
 ```bash
-curl --location 'http://localhost:8081/axonsaga/api/orders/cancel' \
---header 'Content-Type: application/json' \
---data '{
-    "orderId": "{場景一成功的orderId}",
-    "reason": "售後七天無條件退貨"
-}'
+curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/{場景一成功的orderId}/cancel?reason=售後七天無條件退貨'
 ```
 
 #### 2. 第四階段：檢查錢包加回，Redis 可用庫存退回
@@ -405,11 +464,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 當對該訂單發送付款確認請求以變更其狀態：
 * **送出付款確認請求**：
   ```bash
-  curl --location 'http://localhost:8081/axonsaga/api/orders/pay' \
-  --header 'Content-Type: application/json' \
-  --data '{
-      "orderId": "{orderId}"
-  }'
+  curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/{orderId}/pay'
   ```
 * **檢查 Redis 快取 Key 是否已被刪除**：
   ```bash
@@ -604,11 +659,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 * **對該訂單發送付款確認請求**（將訂單推送到下一步驟，觸發庫存預留與付款啟動等後續事件）：
   ```bash
-  curl --location 'http://localhost:8081/axonsaga/api/orders/pay' \
-  --header 'Content-Type: application/json' \
-  --data '{
-      "orderId": "{orderId}"
-  }'
+  curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/{orderId}/pay'
   ```
   *(當 Saga 處理時，會觸發 ConfirmStockReservedCommand 並發布第 2 個事件：`OrderStockReservedEvent`，此時事件累積數達到 2，自動觸發快照生成)*
 
@@ -764,9 +815,9 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 3. **驗證 Legacy 讀取端快取**：
    ```bash
-   redis-cli GET order:cache:{orderId}
+   redis-cli GET order:view:{orderId}
    ```
-   * **預期結果**：回傳值應為對應的訂單建立 JSON 事件，說明讀取端已成功從 Kafka 消費並建立快取。
+   * **預期結果**：回傳值應為對應的訂單建立 JSON 事件，說明讀取端已成功從 Kafka 消費並建立唯讀長效視圖快取（註：`order:cache:{orderId}` 僅是寫入端 5 秒存活的短期快取，驗證應使用長效唯讀視圖 `order:view:{orderId}`）。
 
 ---
 
@@ -820,9 +871,56 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
         ```
      2. 驗證讀取端快取或查詢 API 已最終一致地更新：
         ```bash
-        redis-cli GET order:cache:{orderId}
+        redis-cli GET order:view:{orderId}
         ```
-        預期取得已建立之快取 JSON。
+        預期取得已建立之唯讀長效視圖快取 JSON。
+
+---
+
+## ⚡ 庫存與預留記錄對帳與自癒 (Reconciliation) 驗證流程
+
+本測試驗證：背景定時或手動觸發對帳自癒排程時，若 Redis 與 MySQL（Source of Truth）之間的可用庫存、預留庫存或訂單預留狀態因網路、當機等原因產生偏差，系統將自動比對並校正寫回 Redis 快取。
+
+### 1. 手動製造 Redis 庫存偏差
+* **手動使用 Redis-cli 竄改 `PROD-001` 的可用庫存為錯誤數值（例如 50 件，MySQL 實際應為 100 件）**：
+  ```bash
+  redis-cli SET product:PROD-001:stock 50
+  ```
+
+### 2. 手動觸發對帳與自癒 API
+* **向對帳端點發送 POST 請求**：
+  ```bash
+  curl --location --request POST 'http://localhost:8081/axonsaga/api/inventory/reconcile'
+  ```
+
+* **驗證 API 回傳結果**：
+  API 將回傳 JSON 格式的稽核自癒報告：
+  ```json
+  {
+      "success": true,
+      "productsAudited": 4,
+      "stockDriftsDetected": 1,
+      "stockDriftsCorrected": 1,
+      "reservationsAudited": 0,
+      "reservationDriftsDetected": 0,
+      "reservationDriftsCorrected": 0,
+      "details": [
+          "商品 PROD-001 可用庫存不一致，已修復: Redis=50, MySQL=100"
+      ],
+      "timestamp": "2026-06-10T..."
+  }
+  ```
+
+### 3. 驗證 Redis 快取已被自動修正
+* **重新查詢 Redis 快取可用庫存**：
+  ```bash
+  redis-cli GET product:PROD-001:stock
+  ```
+  * **預期結果**：回傳值已被成功更正回 `100`。
+* **觀察控制台對帳日誌**：
+  ```text
+  [Reconciliation] 商品 PROD-001 可用庫存不一致，已修復: Redis=50, MySQL=100
+  ```
 
 ---
 

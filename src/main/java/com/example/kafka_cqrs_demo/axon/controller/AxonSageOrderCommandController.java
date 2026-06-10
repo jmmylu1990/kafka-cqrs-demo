@@ -4,8 +4,6 @@ import com.example.kafka_cqrs_demo.axon.command.AxonSagaCreateOrderCommand;
 import com.example.kafka_cqrs_demo.axon.command.CancelOrderCommand;
 import com.example.kafka_cqrs_demo.axon.command.ConfirmPaymentCommand;
 import com.example.kafka_cqrs_demo.axon.command.ProcessPaymentCommand;
-import com.example.kafka_cqrs_demo.axon.dto.CancelOrderRequest;
-import com.example.kafka_cqrs_demo.axon.dto.PayOrderRequest;
 import com.example.kafka_cqrs_demo.legacy.command.dto.CreateOrderRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.gateway.CommandGateway;
@@ -94,27 +92,26 @@ public class AxonSageOrderCommandController {
     /**
      * 處理付款確認的 REST API 請求。
      *
-     * @param request 包含訂單 ID 的付款確認請求 DTO
-     * @return 包含付款處理結果的 CompletableFuture 物件
+     * @param orderId 訂單唯一識別碼
+     * @param userId 選擇性傳入的付款人 ID
+     * @return 包含付款處理結果的 ResponseEntity
      */
-    @PostMapping("/pay")
-    public ResponseEntity<Map<String, Object>> payOrder(@RequestBody PayOrderRequest request) {
-        String userId = request.getUserId() != null && !request.getUserId().isBlank()
-            ? request.getUserId()
-            : "USER-001";
-        log.info("接收到訂單付款請求，訂單 ID: {}, 使用者 ID: {}", request.getOrderId(), userId);
+    @PostMapping("/{orderId}/pay")
+    public ResponseEntity<Map<String, Object>> payOrder(@PathVariable String orderId,
+                                                        @RequestParam(required = false, defaultValue = "USER-001") String userId) {
+        log.info("接收到訂單付款請求，訂單 ID: {}, 使用者 ID: {}", orderId, userId);
         
         // 1. 異步發送 Command，不阻塞等待背景 Saga/金流 API 處理
-        commandGateway.send(new ProcessPaymentCommand(request.getOrderId(), userId));
+        commandGateway.send(new ProcessPaymentCommand(orderId, userId));
         
         // 2. 建立查詢狀態的 Location URL
-        String queryUrl = "http://localhost:8081/axonsaga/api/orders/" + request.getOrderId();
+        String queryUrl = "http://localhost:8081/axonsaga/api/orders/" + orderId;
         
         // 3. 封裝 REST Response Body
         Map<String, Object> responseBody = new HashMap<>();
         responseBody.put("status", "PROCESSING");
         responseBody.put("message", "付款扣款流程已啟動，請至 Location 標頭或 queryUrl 中的網址查詢最終結果");
-        responseBody.put("orderId", request.getOrderId());
+        responseBody.put("orderId", orderId);
         responseBody.put("queryUrl", queryUrl);
         
         // 4. 回傳 HTTP 202 Accepted 與 Location 標頭
@@ -126,12 +123,14 @@ public class AxonSageOrderCommandController {
     /**
      * 處理取消訂單的 REST API 請求。
      *
-     * @param request 包含訂單 ID 與取消原因的請求 DTO
+     * @param orderId 訂單唯一識別碼
+     * @param reason 取消原因
      * @return 包含取消處理結果的 CompletableFuture 物件
      */
-    @PostMapping("/cancel")
-    public CompletableFuture<String> cancelOrder(@RequestBody CancelOrderRequest request) {
-        log.info("接收到訂單取消請求，訂單 ID: {}, 原因: {}", request.getOrderId(), request.getReason());
-        return commandGateway.send(new CancelOrderCommand(request.getOrderId(), request.getReason()));
+    @PostMapping("/{orderId}/cancel")
+    public CompletableFuture<String> cancelOrder(@PathVariable String orderId,
+                                                 @RequestParam(required = false, defaultValue = "用戶取消") String reason) {
+        log.info("接收到訂單取消請求，訂單 ID: {}, 原因: {}", orderId, reason);
+        return commandGateway.send(new CancelOrderCommand(orderId, reason));
     }
 }

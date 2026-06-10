@@ -45,22 +45,22 @@ public class MockExternalPaymentController {
     /**
      * 啟用或關閉扣款超時模擬
      */
-    @PostMapping("/control/debit-timeout")
+    @PutMapping("/control/debit-timeout")
     public ResponseEntity<String> controlDebitTimeout(@RequestParam boolean enable) {
         debitTimeoutEnabled.set(enable);
         log.info("[MockExternalAPI] 控制端點設定扣款超時模擬為: {}", enable);
         return ResponseEntity.ok("設定成功，debit-timeout: " + enable);
-    }
+     }
 
-    /**
-     * 啟用或關閉退款隨機失敗模擬
-     */
-    @PostMapping("/control/refund-fail")
-    public ResponseEntity<String> controlRefundFail(@RequestParam boolean enable) {
-        refundFailureEnabled.set(enable);
-        log.info("[MockExternalAPI] 控制端點設定退款失敗模擬為: {}", enable);
-        return ResponseEntity.ok("設定成功，refund-fail: " + enable);
-    }
+     /**
+      * 啟用或關閉退款隨機失敗模擬
+      */
+     @PutMapping("/control/refund-fail")
+     public ResponseEntity<String> controlRefundFail(@RequestParam boolean enable) {
+         refundFailureEnabled.set(enable);
+         log.info("[MockExternalAPI] 控制端點設定退款失敗模擬為: {}", enable);
+         return ResponseEntity.ok("設定成功，refund-fail: " + enable);
+     }
 
     /**
      * 查詢當前故障模擬開關狀態
