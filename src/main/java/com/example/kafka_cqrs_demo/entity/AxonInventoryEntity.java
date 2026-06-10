@@ -31,6 +31,9 @@ public class AxonInventoryEntity {
     /** 當前已被 Saga 流程預留/鎖定但尚未完成交易的庫存數量 */
     private int reservedStock;
 
+    /** 是否為熱點商品 (用以實現冷熱商品快取分離) */
+    private boolean isHot;
+
     /** 版本號，用以支援 JPA 樂觀鎖 */
     @Version
     private Long version;
@@ -42,5 +45,16 @@ public class AxonInventoryEntity {
         this.productId = productId;
         this.stock = stock;
         this.reservedStock = reservedStock;
+        this.isHot = false;
+    }
+
+    /**
+     * 自定義四參數建構子，支援冷熱商品標記。
+     */
+    public AxonInventoryEntity(String productId, int stock, int reservedStock, boolean isHot) {
+        this.productId = productId;
+        this.stock = stock;
+        this.reservedStock = reservedStock;
+        this.isHot = isHot;
     }
 }

@@ -78,10 +78,18 @@ public class AxonSageProductQueryController {
                             stockVal = String.valueOf(inventory.getStock());
                             reservedVal = String.valueOf(inventory.getReservedStock());
 
-                            // 寫回 Redis，設定 TTL 為 30 分鐘（模擬冷熱分離的冷商品動態加載）
-                            stockBucket.set(stockVal, 30, TimeUnit.MINUTES);
-                            reservedBucket.set(reservedVal, 30, TimeUnit.MINUTES);
-                            log.info("[DCL-Product] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 30分鐘): {}", productId);
+                            boolean isHot = inventory.isHot();
+                            long ttl = isHot ? 1 : 60;
+                            TimeUnit timeUnit = isHot ? TimeUnit.DAYS : TimeUnit.SECONDS;
+
+                            stockBucket.set(stockVal, ttl, timeUnit);
+                            reservedBucket.set(reservedVal, ttl, timeUnit);
+
+                            String isHotKey = "product:" + productId + ":isHot";
+                            redissonClient.getBucket(isHotKey, StringCodec.INSTANCE).set(isHot ? "true" : "false", ttl, timeUnit);
+
+                            log.info("[DCL-Product] 從 MySQL 讀取成功並已回寫 Redis 快取 (是否為熱商品: {}, TTL: {} {}): {}",
+                                    isHot, ttl, timeUnit, productId);
                         } else {
                             log.warn("[DCL-Product] 商品不存在，ID: {}", productId);
                             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();

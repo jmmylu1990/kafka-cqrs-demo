@@ -104,10 +104,19 @@ public class InventoryService {
                     Optional<AxonInventoryEntity> inventoryOpt = inventoryRepository.findById(productId);
                     if (inventoryOpt.isPresent()) {
                         AxonInventoryEntity dbInventory = inventoryOpt.get();
-                        stockBucket.set(String.valueOf(dbInventory.getStock()));
-                        reservedBucket.set(String.valueOf(dbInventory.getReservedStock()));
-                        log.info("[InventoryService] 成功從 MySQL 載入商品 {} 的庫存至 Redis (庫存: {}, 預留: {})",
-                                productId, dbInventory.getStock(), dbInventory.getReservedStock());
+                        
+                        boolean isHot = dbInventory.isHot();
+                        long ttl = isHot ? 1 : 60;
+                        TimeUnit timeUnit = isHot ? TimeUnit.DAYS : TimeUnit.SECONDS;
+                        
+                        stockBucket.set(String.valueOf(dbInventory.getStock()), ttl, timeUnit);
+                        reservedBucket.set(String.valueOf(dbInventory.getReservedStock()), ttl, timeUnit);
+                        
+                        String isHotKey = "product:" + productId + ":isHot";
+                        redissonClient.getBucket(isHotKey, StringCodec.INSTANCE).set(isHot ? "true" : "false", ttl, timeUnit);
+                        
+                        log.info("[InventoryService] 成功從 MySQL 載入商品 {} 的庫存至 Redis (庫存: {}, 預留: {}, 是否熱商品: {}, TTL: {} {})",
+                                productId, dbInventory.getStock(), dbInventory.getReservedStock(), isHot, ttl, timeUnit);
                     } else {
                         log.warn("[InventoryService] 預留失敗：商品 {} 在 MySQL 與 Redis 中皆不存在", productId);
                         eventGateway.publish(new StockFailedEvent(orderId, "商品不存在"));
@@ -124,11 +133,9 @@ public class InventoryService {
                     return;
                 }
 
-                // 3. 扣減可用庫存，增加預留庫存
-                stockBucket.set(String.valueOf(currentStock - qty));
-
+                // 3. 扣減可用庫存，增加預留庫存 (使用 helper 套用正確 TTL)
                 int currentReserved = reservedBucket.isExists() ? Integer.parseInt(reservedBucket.get()) : 0;
-                reservedBucket.set(String.valueOf(currentReserved + qty));
+                updateProductCache(productId, currentStock - qty, currentReserved + qty);
 
                 // 4. 寫入訂單預留紀錄哈希表
                 orderResMap.put("productId", productId);
@@ -226,9 +233,9 @@ public class InventoryService {
                         qty = resOpt.map(AxonStockReservationEntity::getQuantity).orElse(0);
                     }
 
-                    // 1. 扣減 Redis 預留量
+                    // 1. 扣減 Redis 預留量 (使用 helper 套用正確 TTL)
                     int currentReserved = reservedBucket.isExists() ? Integer.parseInt(reservedBucket.get()) : 0;
-                    reservedBucket.set(String.valueOf(Math.max(0, currentReserved - qty)));
+                    updateProductCache(productId, null, Math.max(0, currentReserved - qty));
 
                     // 2. 更新狀態
                     orderResMap.put("status", "COMPLETED");
@@ -308,10 +315,8 @@ public class InventoryService {
                 if ("RESERVED".equals(status)) {
                     // 1. 未付款取消 (RELEASE)：將庫存加回可用，並扣減預留量
                     int currentStock = stockBucket.isExists() ? Integer.parseInt(stockBucket.get()) : 0;
-                    stockBucket.set(String.valueOf(currentStock + qty));
-
                     int currentReserved = reservedBucket.isExists() ? Integer.parseInt(reservedBucket.get()) : 0;
-                    reservedBucket.set(String.valueOf(Math.max(0, currentReserved - qty)));
+                    updateProductCache(productId, currentStock + qty, Math.max(0, currentReserved - qty));
 
                     orderResMap.put("status", "RELEASED");
                     orderResMap.put("updatedAt", String.valueOf(System.currentTimeMillis()));
@@ -327,7 +332,7 @@ public class InventoryService {
                 } else if ("COMPLETED".equals(status)) {
                     // 3. 已付款後取消退貨 (REFUND)：僅加回可用庫存
                     int currentStock = stockBucket.isExists() ? Integer.parseInt(stockBucket.get()) : 0;
-                    stockBucket.set(String.valueOf(currentStock + qty));
+                    updateProductCache(productId, currentStock + qty, null);
 
                     orderResMap.put("status", "REFUNDED");
                     orderResMap.put("updatedAt", String.valueOf(System.currentTimeMillis()));
@@ -351,6 +356,28 @@ public class InventoryService {
                 lock.unlock();
             }
         }
+    }
+
+    private void updateProductCache(String productId, Integer newStock, Integer newReserved) {
+        String isHotKey = "product:" + productId + ":isHot";
+        RBucket<String> isHotBucket = redissonClient.getBucket(isHotKey, StringCodec.INSTANCE);
+        
+        String isHotVal = isHotBucket.get();
+        boolean isHot = "true".equals(isHotVal);
+        long ttl = isHot ? 1 : 60;
+        TimeUnit timeUnit = isHot ? TimeUnit.DAYS : TimeUnit.SECONDS;
+
+        if (newStock != null) {
+            String stockKey = "product:" + productId + ":stock";
+            RBucket<String> stockBucket = redissonClient.getBucket(stockKey, StringCodec.INSTANCE);
+            stockBucket.set(String.valueOf(newStock), ttl, timeUnit);
+        }
+        if (newReserved != null) {
+            String reservedKey = "product:" + productId + ":reserved";
+            RBucket<String> reservedBucket = redissonClient.getBucket(reservedKey, StringCodec.INSTANCE);
+            reservedBucket.set(String.valueOf(newReserved), ttl, timeUnit);
+        }
+        isHotBucket.set(isHot ? "true" : "false", ttl, timeUnit); // 刷新 isHot 標記的 TTL
     }
 
     private void sendSyncEvent(String orderId, String productId, int qty, String action) {

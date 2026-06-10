@@ -50,6 +50,10 @@
 * **防範快取擊穿與動態快取載入 (Double-Checked Locking / DCL)**：
   * **防快取擊穿**：在訂單與商品查詢端實作 Double-Checked Locking 機制，當 Redis 快取未命中時，使用 Redisson 分散式鎖進行併發防護，確保只有一個執行緒去 MySQL 查詢並回寫 Redis，避免海量請求同時穿透資料庫。
   * **冷商品動態載入**：在庫存預留端 (Command Side)，若 Redis 快取未命中（模擬冷商品），自動在商品鎖的保護下進行 DCL 載入，將 MySQL 的最新庫存與預留數據同步至 Redis，保證冷商品也能順利下單，為商品的冷熱分離提供底層支持。
+* **商品冷熱分離快取策略 (Hot/Cold Cache Separation)**：
+  * **分類預熱**：MySQL `t_axon_inventory` 表新增 `is_hot` 標記。啟動時僅預熱 `is_hot = true` 的熱商品（如 `PROD-001`）到 Redis，配置 **1 天 TTL**；冷商品預設不在 Redis 中。
+  * **動態短效快取**：當冷商品被查詢或下單觸發 DCL 載入時，在 Redis 中設定短效 **60 秒 TTL**，無人訪問時自動過期，大幅釋放 Redis 記憶體壓力。
+  * **更新時 TTL 保護**：在庫存異動時（如預留、扣款、釋放），動態讀取 isHot 標記，更新 stock 與 reserved 時同步刷新對應的 TTL，防止覆蓋操作使冷商品快取永久化。
 
 ---
 
@@ -71,6 +75,9 @@ Axon 模組使用以下 MySQL 表格進行狀態儲存：
    * `product_id` (VARCHAR, 主鍵)
    * `stock` (INT, 當前可用庫存)
    * `reserved_stock` (INT, 預留鎖定的庫存)
+   * `is_hot` (TINYINT/BOOLEAN, 是否為熱點商品，用以冷熱快取分離)
+   * `version` (BIGINT, 樂觀鎖版本號，用以併發落庫安全)
+
 
 3. **t_axon_stock_reservation (庫存預留明細表)**
    * `order_id` (VARCHAR, 主鍵)
@@ -145,9 +152,16 @@ redis-cli FLUSHALL
 
 ### 3. 啟動服務
 重啟您的 Spring Boot 服務。啟動時，`AxonDatabaseInitializer` 會自動在資料庫與 Redis 中配置測試資料：
-* 商品 `PROD-001`：庫存 100 件（Redis Key: `product:PROD-001:stock`）。
-* 使用者 `USER-001`：餘額 1000 元。
-* 使用者 `USER-002`：餘額 10 元。
+* **熱點商品 (Pre-warmed)**：
+  * 商品 `PROD-001`：庫存 100 件，熱點商品，快取預熱 1 天 (TTL 1 天)。
+  * 商品 `PROD-DLQ-TEST`：庫存 100 件，熱點測試商品，快取預熱 1 天 (TTL 1 天，用以測試 Kafka DLQ 重試)。
+* **冷門商品 (Dynamic Load)**：
+  * 商品 `PROD-002`：庫存 5 件，冷商品，預設不預熱快取，查詢/下單時動態鎖定載入 60 秒 (TTL 60 秒)。
+  * 商品 `PROD-003`：庫存 0 件，冷商品，預設不預熱快取 (可用庫存為 0，用以測試 Saga 自動補償)。
+* **測試錢包**：
+  * 使用者 `USER-001`：餘額 1000 元。
+  * 使用者 `USER-002`：餘額 10 元。
+
 
 ---
 
@@ -648,3 +662,55 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
   [DCL] Redis 快取未命中且已獲取鎖，嘗試從 MySQL 查詢: {orderId}
   [DCL] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 1 天): {orderId}
   ```
+
+---
+
+## ⚡ 商品冷熱分離快取策略驗證流程
+
+本測試驗證：系統啟動時只會預熱熱商品；冷商品預設不在 Redis，但查詢或下單時會動態載入且僅有 60 秒生命週期。
+
+### 1. 驗證啟動時分類預熱
+* **啟動服務並檢查 Redis 所有的 product 鍵**：
+  ```bash
+  docker exec cqrs-redis redis-cli KEYS "product:*"
+  ```
+* **預期結果**：
+  * 只會看到 `PROD-001` 與 `PROD-DLQ-TEST` 的快取鍵。
+  * 查詢其餘的 `PROD-002` 及 `PROD-003` 鍵應不存在。
+* **驗證熱商品快取 TTL (應接近 1 天/86400秒)**：
+  ```bash
+  docker exec cqrs-redis redis-cli TTL product:PROD-001:stock
+  ```
+
+### 2. 驗證冷商品動態載入與自動過期 (TTL 60 秒)
+1. **發送查詢冷商品 `PROD-002` 的 stock 請求**：
+   ```bash
+   curl -i http://localhost:8081/axonsaga/api/products/PROD-002/stock
+   ```
+2. **立刻檢查 Redis 中的 TTL**：
+   ```bash
+   docker exec cqrs-redis redis-cli TTL product:PROD-002:stock
+   ```
+   * **預期結果**：回傳值應為小於或等於 `60` 的正整數。
+3. **等待 60 秒後，再次查詢 Redis 鍵**：
+   ```bash
+   docker exec cqrs-redis redis-cli EXISTS product:PROD-002:stock
+   ```
+   * **預期結果**：回傳 `(integer) 0`，代表冷商品快取已過期並自動釋放。
+
+### 3. 驗證冷商品扣減時的 TTL 續期與防永久化
+1. **發送查詢載入 `PROD-002`**：
+   ```bash
+   curl -i http://localhost:8081/axonsaga/api/products/PROD-002/stock
+   ```
+2. **立刻對 `PROD-002` 發起下單預留庫存**：
+   ```bash
+   curl -i --location 'http://localhost:8081/axonsaga/api/orders' \
+   --header 'Content-Type: application/json' \
+   --data '{"productId": "PROD-002","quantity": 1,"price": 10,"userId": "USER-001"}'
+   ```
+3. **再次檢查 Redis 中 `product:PROD-002:stock` 的 TTL**：
+   ```bash
+   docker exec cqrs-redis redis-cli TTL product:PROD-002:stock
+   ```
+   * **預期結果**：TTL 依然是短效的（重設為 60 秒內），證明扣減等更新操作並不會使冷商品的快取變為永久快取。
