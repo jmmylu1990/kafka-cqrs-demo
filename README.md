@@ -16,6 +16,10 @@
   * 生產端配置 `acks=all`、`retries=3`、`max.in.flight.requests.per.connection=5`，開啟 Kafka 內建等冪性發送。
   * 消費端引入 Redis 分散式鎖進行業務去重，防止重複消費。
   * 發送事件時以 `orderId` 作為 Kafka Key，確保同一筆訂單的事件進入同一個 Partition，保證消費順序性。
+* **可靠發件箱模式 (Outbox Pattern)**：
+  * **雙寫一致性保障**：為了解決傳統模式下「MySQL 寫入成功、但 Kafka 發送失敗」導致讀寫資料不一致的痛點，將訂單實體與 `t_outbox` 事件紀錄封裝在同一個 MySQL 本地交易中。
+  * **交易提交 Hook 與背景自癒**：交易 Commit 後，透過 `afterCommit` Hook 立刻非同步發送 Kafka 事件，實現極低延遲；若即時發送失敗或系統當機，每 5 秒執行的 `OutboxScheduler`（受 Redisson 分散式鎖保護）會掃描未處理的發件箱紀錄並重新投遞，保證 **At-Least-Once Delivery**。
+  * **為什麼不在 Axon 模組中實作 Outbox？**：因為 Axon 模組底層採用 **Event Sourcing (事件溯源)** 機制，其產生的領域事件在寫入 `domain_event_entry` 表（本質上就是框架內建的發件箱）時與聚合狀態變更天然處於同一個 MySQL 事務中，已原生解決了雙寫一致性問題；而 Legacy 模組存在傳統手動雙寫（SQL + Kafka）風險，因此最適合手動導入 Outbox Pattern 解決方案。
 
 ### 2. Axon Saga 事件溯源與高併發設計 (Axon Module)
 本模組實作了基於領域驅動設計 (DDD) 的事件溯源、Saga 分散式事務協調與高併發寫入優化：
@@ -119,7 +123,19 @@ Axon 模組使用以下 MySQL 表格進行狀態儲存：
    * `create_time` (DATETIME)
    * `update_time` (DATETIME)
 
+8. **t_outbox (發件箱事件表 - 傳統 CQRS 模式用)**
+   * `id` (VARCHAR, 主鍵，UUID)
+   * `topic` (VARCHAR, 傳送目標主題)
+   * `message_key` (VARCHAR, 訊息分區 Key，例如 orderId)
+   * `payload` (LONGTEXT, 訊息的 JSON 內容)
+   * `status` (VARCHAR, 狀態: PENDING / PROCESSED / FAILED)
+   * `retry_count` (INT, 重試次數)
+   * `error_message` (VARCHAR, 失敗時的例外訊息)
+   * `create_time` (DATETIME)
+   * `update_time` (DATETIME)
+
 ---
+
 
 ## 測試重置步驟 (Reset Environment)
 
@@ -129,6 +145,8 @@ Axon 模組使用以下 MySQL 表格進行狀態儲存：
 在您的 MySQL 管理工具中對目標資料庫執行以下 SQL 語法：
 ```sql
 SET FOREIGN_KEY_CHECKS = 0;
+TRUNCATE TABLE t_order;
+TRUNCATE TABLE t_outbox;
 TRUNCATE TABLE t_axon_order;
 TRUNCATE TABLE t_axon_stock_reservation;
 TRUNCATE TABLE t_axon_inventory;
@@ -714,3 +732,94 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
    docker exec cqrs-redis redis-cli TTL product:PROD-002:stock
    ```
    * **預期結果**：TTL 依然是短效的（重設為 60 秒內），證明扣減等更新操作並不會使冷商品的快取變為永久快取。
+
+---
+
+## ⚡ Outbox Pattern (發件箱模式) 驗證流程
+
+本測試驗證：傳統模式建立訂單時，訂單寫入與 Outbox 紀錄包裹在同一個本地資料庫交易中。在正常情況下利用交易提交 Hook (Post-Commit) 進行極低延遲發送至 Kafka；並在 Kafka 異常時，透過背景輪詢排程器進行自癒重試，保證訊息 At-Least-Once Delivery。
+
+### 場景一：正常下單與即時發送驗證
+1. **發送傳統模式建立訂單請求**：
+   ```bash
+   curl --location 'http://localhost:8081/api/orders' \
+   --header 'Content-Type: application/json' \
+   --data '{
+       "productId": "PROD-001",
+       "quantity": 2,
+       "price": 100
+   }'
+   ```
+   *(請複製 API 回傳的 `{orderId}`)*
+
+2. **檢查 MySQL `t_outbox` 與 `t_order` 表**：
+   ```sql
+   -- 1. 驗證訂單已寫入，狀態為 PENDING
+   SELECT order_id, status FROM my_database.t_order WHERE order_id = '{orderId}';
+
+   -- 2. 驗證 Outbox 紀錄存在，且狀態已藉由交易提交 Hook 立刻轉為 PROCESSED
+   SELECT id, topic, message_key, status, retry_count FROM my_database.t_outbox WHERE message_key = '{orderId}';
+   ```
+   * **預期結果**：`t_outbox` 表中的狀態應立刻變更為 `PROCESSED`（代表交易提交後，Post-Commit 機制已成功且即時地將訊息發出）。
+
+3. **驗證 Legacy 讀取端快取**：
+   ```bash
+   redis-cli GET order:cache:{orderId}
+   ```
+   * **預期結果**：回傳值應為對應的訂單建立 JSON 事件，說明讀取端已成功從 Kafka 消費並建立快取。
+
+---
+
+### 場景二：模擬發送異常與排程器自癒驗證
+我們在系統中預留了針對測試商品 `PROD-OUTBOX-FAIL` 的發送失敗模擬。
+
+1. **發送針對測試商品的下單請求**：
+   ```bash
+   curl --location 'http://localhost:8081/api/orders' \
+   --header 'Content-Type: application/json' \
+   --data '{
+       "productId": "PROD-OUTBOX-FAIL",
+       "quantity": 5,
+       "price": 50
+   }'
+   ```
+   *(請複製回傳的 `{orderId}`)*
+
+2. **檢查交易與發件箱狀態**：
+   * 由於 `PROD-OUTBOX-FAIL` 觸發發送失敗，在主交易提交後，非同步發送會遇到連線超時錯誤。
+   * **SQL 驗證**：
+     ```sql
+     -- 1. 業務訂單依舊寫入成功，不受影響
+     SELECT order_id, status FROM my_database.t_order WHERE order_id = '{orderId}';
+
+     -- 2. 發件箱紀錄狀態依然為 PENDING，且 retry_count 增加，errorMessage 有紀錄超時資訊
+     SELECT status, retry_count, error_message FROM my_database.t_outbox WHERE message_key = '{orderId}';
+     ```
+   * **預期結果**：狀態為 `PENDING`，`retry_count` 顯示 `1` 或是每次排程掃描累加的次數（每 5 秒累加一次，上限 5 次）。
+
+3. **模擬 Kafka 網路修復與背景自癒**：
+   * 請在 [OutboxService.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/service/OutboxService.java) 中將模擬發送異常的程式碼註解掉（在 `publishEvent` 方法中）：
+     ```java
+     // if ("PROD-OUTBOX-FAIL".equals(entity.getMessageKey()) || "PROD-OUTBOX-FAIL".equals(entity.getPayload())) {
+     //     log.warn("[OutboxService] [TEST MODE] 偵測到測試 Key/Payload，故意模擬 Kafka 發送連線異常！");
+     //     self.handleFailedSend(entity.getId(), "模擬 Kafka 連線超時異常 (測試商品 PROD-OUTBOX-FAIL)");
+     //     return;
+     // }
+     ```
+   * 保存修改後，重啟 Spring Boot 服務。
+   * 服務啟動後，`OutboxScheduler` 發現該筆 `PENDING` 記錄，背景排程器會自動重新發送。
+   * **觀察控制台日誌**：
+     ```text
+     INFO --- [   scheduling-1] c.e.k.scheduler.OutboxScheduler         : 發現 1 筆待處理的 Outbox 訊息，開始進行發送...
+     INFO --- [   scheduling-1] com.example.kafka_cqrs_demo.service.OutboxService    : 成功更新 Outbox 狀態為 PROCESSED。ID: ...
+     ```
+   * **重新查詢 MySQL 與 Redis**：
+     1. 查得 `t_outbox` 狀態已成功自癒更新為 `PROCESSED`：
+        ```sql
+        SELECT status FROM my_database.t_outbox WHERE message_key = '{orderId}';
+        ```
+     2. 驗證讀取端快取或查詢 API 已最終一致地更新：
+        ```bash
+        redis-cli GET order:cache:{orderId}
+        ```
+        預期取得已建立之快取 JSON。

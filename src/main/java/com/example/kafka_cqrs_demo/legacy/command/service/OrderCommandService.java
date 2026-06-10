@@ -6,8 +6,8 @@ import com.example.kafka_cqrs_demo.legacy.event.OrderCreatedEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.beans.factory.annotation.Autowired;
+import com.example.kafka_cqrs_demo.service.OutboxService;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
@@ -28,7 +28,7 @@ import java.util.concurrent.TimeUnit;
 public class OrderCommandService {
 
     private final OrderCommandRepository orderRepository;
-    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final OutboxService outboxService;
     private final ObjectMapper objectMapper;
     private final StringRedisTemplate redisTemplate;
 
@@ -45,17 +45,17 @@ public class OrderCommandService {
      * 建構子。
      *
      * @param orderRepository 訂單寫入端 Repository
-     * @param kafkaTemplate Spring Kafka 模板
+     * @param outboxService 發件箱服務
      * @param objectMapper Jackson ObjectMapper
      * @param redisTemplate Spring Redis 模板
      */
     @Autowired
     public OrderCommandService(OrderCommandRepository orderRepository,
-                               KafkaTemplate<String, String> kafkaTemplate,
+                               OutboxService outboxService,
                                ObjectMapper objectMapper,
                                StringRedisTemplate redisTemplate) {
         this.orderRepository = orderRepository;
-        this.kafkaTemplate = kafkaTemplate;
+        this.outboxService = outboxService;
         this.objectMapper = objectMapper;
         this.redisTemplate = redisTemplate;
     }
@@ -76,23 +76,19 @@ public class OrderCommandService {
     public String createOrder(String productId, int quantity, long price) {
         String orderId = UUID.randomUUID().toString();
 
-        // 1. 第一步：呼叫具備獨立事務的方法，安全的寫入 MySQL 資料庫
+        // 1. 第一步：呼叫具備獨立事務的方法，將「業務訂單」與「Outbox 紀錄」包裹在同一個事務中寫入 MySQL
         self.saveOrderToDb(orderId, productId, quantity, price);
 
-        // 2. 第二步：非同步向外廣播與快取
-        OrderCreatedEvent event = new OrderCreatedEvent(orderId, productId, quantity, price);
+        // 2. 第二步：非同步寫入 Redis 短期快取，供前端即時查詢 (發送交給 Outbox 異步可靠處理)
         try {
+            OrderCreatedEvent event = new OrderCreatedEvent(orderId, productId, quantity, price);
             String jsonEvent = objectMapper.writeValueAsString(event);
 
             // 寫入 5 秒的短效快取，防止前端在發布事件的極短時間內輪詢讀不到資料
             redisTemplate.opsForValue().set("order:cache:" + orderId, jsonEvent, 5, TimeUnit.SECONDS);
-
-            // 發送事件到 Kafka 主題
-            kafkaTemplate.send("order-events", orderId, jsonEvent);
-            log.info("【Command 端】資料庫已留痕，成功外發 Kafka 事件與 Redis 快取。ID: {}", orderId);
+            log.info("【Command 端】資料庫已留痕且 Redis 短效快取寫入成功。ID: {}", orderId);
         } catch (Exception e) {
-            // 實務考量：萬一 Kafka 失敗，MySQL 已經有了 PENDING 資料，可以透過排程（Cron Job）進行補償重發
-            log.error("【Command 嚴重警告】Kafka 發送失敗，但 DB 已留痕，觸發異步補償機制", e);
+            log.error("【Command】寫入 Redis 短效快取失敗，但不影響主流程交易", e);
         }
 
         return orderId;
@@ -117,5 +113,9 @@ public class OrderCommandService {
         entity.setStatus("PENDING"); // 初始狀態設為 PENDING，代表處理中
         entity.setCreateTime(LocalDateTime.now());
         orderRepository.save(entity);
+
+        // 3. 寫入 Outbox 表格，兩者在同一個 MySQL 事務中，確保 At-Least-Once
+        OrderCreatedEvent event = new OrderCreatedEvent(orderId, productId, quantity, price);
+        outboxService.saveEvent("order-events", orderId, event);
     }
 }
