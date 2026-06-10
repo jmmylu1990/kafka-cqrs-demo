@@ -26,6 +26,14 @@
 * **Kafka 最終一致性同步與寫入優化**：
   * Redis 扣減或釋放成功後，發送 `InventorySyncEvent` 訊息至 Kafka `inventory-sync-events` 主題，以 **`productId`** 作為 Partition Key，保證同一商品的所有更新序列化在同一個分割區，避免跨執行緒資料庫寫入競爭。
   * 背景 Consumer 異步落庫寫回 MySQL，並實作 **JPA 樂觀鎖 (`@Version`)** 防護與 **衝突自動重試機制**，確保最終一致性的絕對安全與極致寫入效能。
+* **訂單快取 1 天 TTL 與快取失效 (Cache Eviction) 機制**：
+  * **過期限制**：訂單建立寫入 Redis 時設定生存時間 (TTL) 為 1 天，防止歷史垃圾數據無限期吞噬快取伺服器記憶體。
+  * **失效快取**：當訂單狀態變更時，改用 Cache Eviction 直接刪除 Redis 快取 Key，完美規避因網路延遲等並發時序錯亂造成的舊資料覆蓋新資料（快取髒數據）問題。
+  * **快取延遲載入**：查詢端實現 **Cache-Aside 模式**，當 Redis 未命中時，自動向 MySQL 載入並重設 1 天 TTL 回寫快取。
+* **Kafka 消費端異常重試與死信佇列 (DLQ)**：
+  * **通用異常處理器**：配置 Spring Kafka `CommonErrorHandler`，針對資料庫連線、併發鎖衝突等暫時性異常，自動進行 3 次重試（間隔 1 秒）。重試失敗後，將訊息投遞到 `inventory-sync-events.DLQ`。
+  * **快速失敗與死信**：將 JSON 反序列化解析錯誤 (JsonProcessingException) 設定為不可重試異常，略過重試直接送入死信佇列。
+  * **警報通知**：設有 DLQ 監聽器，一旦訊息降級進入死信，模擬發送警報簡訊通知工程師人工介入。
 * **模擬外部金流防腐層 (PaymentAdapter/ACL)**：
   * 移除本地資料庫強耦合，解耦為獨立外部金流 API (`MockExternalPaymentController`)。
   * `PaymentAdapter` 扮演防腐層，透過 HTTP REST API 請求外部扣款/退款，將結果轉譯為 Axon 事件推動 Saga。
@@ -298,4 +306,101 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
   -- 2. 驗證庫存預留表格不會有該 orderId 的成功預留紀錄
   SELECT order_id, status FROM t_axon_stock_reservation WHERE order_id = '{orderId}';
   ```
-```
+
+---
+
+## ⚡ 訂單快取過期與失效快取 (Cache-Aside) 驗證流程
+
+本測試驗證：訂單建立時具備 1 天 TTL；狀態更新時快取會被直接刪除；查詢未命中時能自動回寫快取。
+
+### 1. 建立訂單，驗證新快取 TTL（1 天）
+* **發送下單請求**：
+  ```bash
+  curl --location 'http://localhost:8081/axonsaga/api/orders' \
+  --header 'Content-Type: application/json' \
+  --data '{
+      "productId": "PROD-001",
+      "quantity": 2,
+      "price": 100,
+      "userId": "USER-001"
+  }'
+  ```
+  *(複製 API 回傳的 `{orderId}`)*
+
+* **查詢 Redis 中快取的 TTL（Time-To-Live）**：
+  ```bash
+  redis-cli TTL order:{orderId}
+  ```
+  * **預期結果**：回傳值應為一個接近 `86400` 的正整數（代表已成功設定為 1 天過期，不再是永久留存）。
+
+### 2. 變更訂單狀態，驗證快取失效 (Eviction)
+當對該訂單發送付款確認請求以變更其狀態：
+* **送出付款確認請求**：
+  ```bash
+  curl --location 'http://localhost:8081/axonsaga/api/orders/pay' \
+  --header 'Content-Type: application/json' \
+  --data '{
+      "orderId": "{orderId}"
+  }'
+  ```
+* **檢查 Redis 快取 Key 是否已被刪除**：
+  ```bash
+  redis-cli EXISTS order:{orderId}
+  ```
+  * **預期結果**：回傳 `(integer) 0`（快取已被成功刪除以防髒數據）。
+
+### 3. 查詢訂單，驗證快取延遲載入 (Cache-Aside)
+* **發送查詢請求**：
+  ```bash
+  curl --location 'http://localhost:8081/axonsaga/api/orders/{orderId}'
+  ```
+* **驗證控制台日誌輸出**：
+  您應該會在控制台看到以下依序輸出的日誌：
+  ```text
+  [Projection] Redis 快取未命中 (Cache Miss)，嘗試從 MySQL 查詢: {orderId}
+  [Projection] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 1 天): {orderId}
+  ```
+* **再次查詢 Redis 快取狀態**：
+  ```bash
+  redis-cli TTL order:{orderId}
+  ```
+  * **預期結果**：快取 Key 再次存在，且 TTL 重新被更新設定為 `86400` 秒（1 天）。
+
+---
+
+## 🛠 Kafka 消費端重試與死信佇列 (DLQ) 驗證流程
+
+本測試驗證：非暫時性異常（毒藥丸）直接進 DLQ；暫時性資料庫連線失敗時重試 3 次，失敗後進入 DLQ 並發送警報。
+
+### 1. 測試「毒藥丸」（格式錯誤，直接進 DLQ 不重試）
+* **使用 Kafka 控制台生產者發送毀損訊息**：
+  ```bash
+  docker exec -it kafka kafka-console-producer --bootstrap-server localhost:9092 --topic inventory-sync-events
+  ```
+  *(進入生產者模式後，手動打入 `"{broken-json-format"` 並按 Enter 送出，隨後按 Ctrl+C 退出)*
+
+* **驗證控制台日誌**：
+  因為這是不可重試的 JSON 解析異常，系統不會進行任何重試，訊息直接進入 DLQ，並在控制台輸出警報：
+  ```text
+  [ALERT] [SMS GATEWAY] 警報：庫存同步訊息進入死信佇列 (DLQ)！已發送簡訊通知工程師人工排查。訊息內容: {broken-json-format
+  ```
+
+### 2. 測試「暫時性資料庫異常」（重試 3 次後進入 DLQ）
+* **人為製造臨時異常**：
+  請在 [InventorySyncConsumer.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/axon/service/InventorySyncConsumer.java) 的 `handleReserve` 方法（約第 77 行）中，臨時加入一行代碼：
+  ```java
+  throw new RuntimeException("模擬暫時性資料庫連線超時！");
+  ```
+* **發送一次正常的下單請求**（同上方建立訂單的 curl 指令）。
+* **驗證控制台日誌**：
+  您會看到消費端連續印出 3 次重試日誌（每次間隔約 1 秒）：
+  ```text
+  [InventorySyncConsumer] 收到庫存同步 Kafka 訊息... (第 1 次嘗試)
+  [InventorySyncConsumer] 收到庫存同步 Kafka 訊息... (第 2 次嘗試)
+  [InventorySyncConsumer] 收到庫存同步 Kafka 訊息... (第 3 次嘗試)
+  ```
+  3 次重試都失敗後，訊息被自動投遞到 DLQ，觸發警報監聽器：
+  ```text
+  [ALERT] [SMS GATEWAY] 警報：庫存同步訊息進入死信佇列 (DLQ)！已發送簡訊通知工程師人工排查。訊息內容: {"orderId":"...","productId":"PROD-001",...}
+  ```
+* **測試完畢後**：請記得刪除或註解掉臨時加入的 `throw new RuntimeException("...")` 代碼。

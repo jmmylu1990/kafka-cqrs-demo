@@ -46,32 +46,39 @@ public class InventorySyncConsumer {
      */
     @KafkaListener(topics = InventoryKafkaConfig.INVENTORY_SYNC_TOPIC, groupId = "inventory-sync-group")
     @Transactional
-    public void consume(String message) {
+    public void consume(String message) throws Exception {
         log.info("[InventorySyncConsumer] 收到庫存同步 Kafka 訊息: {}", message);
 
-        try {
-            InventorySyncEvent event = objectMapper.readValue(message, InventorySyncEvent.class);
-            log.info("[InventorySyncConsumer] 解析事件成功: orderId={}, action={}", event.getOrderId(), event.getActionType());
+        // 不在此處捕捉 DB/業務異常，讓異常向上拋出以觸發 Spring Kafka 重試與 DLQ 流程
+        InventorySyncEvent event = objectMapper.readValue(message, InventorySyncEvent.class);
+        log.info("[InventorySyncConsumer] 解析事件成功: orderId={}, action={}", event.getOrderId(), event.getActionType());
 
-            switch (event.getActionType()) {
-                case "RESERVE":
-                    handleReserve(event);
-                    break;
-                case "COMMIT":
-                    handleCommit(event);
-                    break;
-                case "RELEASE":
-                    handleRelease(event);
-                    break;
-                case "REFUND":
-                    handleRefund(event);
-                    break;
-                default:
-                    log.warn("[InventorySyncConsumer] 未知的同步動作類別: {}", event.getActionType());
-            }
-        } catch (Exception e) {
-            log.error("[InventorySyncConsumer] 處理庫存同步訊息失敗: {}", e.getMessage(), e);
+        switch (event.getActionType()) {
+            case "RESERVE":
+                handleReserve(event);
+                break;
+            case "COMMIT":
+                handleCommit(event);
+                break;
+            case "RELEASE":
+                handleRelease(event);
+                break;
+            case "REFUND":
+                handleRefund(event);
+                break;
+            default:
+                log.warn("[InventorySyncConsumer] 未知的同步動作類別: {}", event.getActionType());
         }
+    }
+
+    /**
+     * 監聽死信佇列 (DLQ)，模擬發送警報簡訊通知工程師人工排查。
+     *
+     * @param message 進入死信佇列的原始訊息內容
+     */
+    @KafkaListener(topics = InventoryKafkaConfig.INVENTORY_SYNC_DLQ_TOPIC, groupId = "inventory-dlq-group")
+    public void consumeDlq(String message) {
+        log.error("[ALERT] [SMS GATEWAY] 警報：庫存同步訊息進入死信佇列 (DLQ)！已發送簡訊通知工程師人工排查。訊息內容: {}", message);
     }
 
     private void handleReserve(InventorySyncEvent event) {
