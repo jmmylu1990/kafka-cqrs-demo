@@ -44,6 +44,9 @@
   * **假性失敗自癒**：Saga 協調取消訂單時，防腐層會再次比對外部實際扣款交易流水（等冪性），若發現先前超時的扣款請求其實已在外部成功執行（假性失敗），將自動發起退款補償，保障資金流一致性。
   * **退款補償重試佇列**：當外部退款因服務故障回傳 500 錯誤或發生連線異常時，自動將退款任務持久化寫入 MySQL **`t_payment_refund_retry_task`** 表中（初始為 `PENDING`），交由定時排程器 `RefundRetryScheduler` 進行自癒重試。
   * **背景退避重試與最高警報**：排程器每 10 秒執行一次，對待處理任務發起重試並採用指數退避算法 (30s * 2^retryCount) 計算下一次重試時間。若重試 5 次上限仍失敗，則將狀態設為 `FAILED` 並發布最高優先級警報日誌，供工程師手動介入。
+* **Axon 事件快照機制 (Event Store Snapshotting)**：
+  * **快照觸發**：配置 `SnapshotTriggerDefinition` 並關聯訂單聚合根 `AxonSagaOrderAggregate`，將快照事件數閾值設定為 2。當該聚合實體累積產生的歷史事件達到 2 筆時（例如完成「訂單建立」與「庫存預留」），系統會自動非同步觸發快照生成。
+  * **快照持久化與還原**：產生的快照將序列化並儲存至資料庫的 `snapshot_event_entry` 表。後續加載聚合時，Axon 會直接讀取最新快照還原聚合狀態，並僅復原/重放快照之後產生的增量事件，大幅度降低隨歷史事件流增長而帶來的聚合重建延遲與資料庫讀取開銷。
 
 ---
 
@@ -124,6 +127,7 @@ TRUNCATE TABLE t_axon_wallet_transaction;
 TRUNCATE TABLE t_axon_dlq_message;
 TRUNCATE TABLE t_payment_refund_retry_task;
 TRUNCATE TABLE domain_event_entry;
+TRUNCATE TABLE snapshot_event_entry;
 TRUNCATE TABLE token_entry;
 TRUNCATE TABLE saga_entry;
 TRUNCATE TABLE association_value_entry;
@@ -532,3 +536,58 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
   * **Redis 快取**：可用庫存自動退回，且 reservation 狀態變更為 `RELEASED`。
   * **MySQL 資料庫**：`t_axon_order` 狀態被自動更新為 `CANCELLED`，且可用/預留庫存自動歸位。
 * **復原設定**：測試完成後，請確保將 [OrderSaga.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/axon/saga/OrderSaga.java) 中的時間設定恢復為生產環境預設的 `Duration.ofMinutes(15)`。
+
+---
+
+## Axon 事件快照機制 (Event Store Snapshotting) 驗證流程
+
+本測試驗證當訂單聚合事件數達到 2 筆時，是否會自動建立快照並將其持久化至 MySQL 資料庫，並在後續聚合加載時讀取該快照。
+
+### 1. 執行環境重置
+* 依序執行上述的資料庫重置 SQL（包含 `snapshot_event_entry` 欄位的清理）並清空 Redis 快取。
+* 重新啟動您的 Spring Boot 服務。
+
+### 2. 觸發快照建立
+* **發送建立訂單請求**：
+  ```bash
+  curl --location 'http://localhost:8081/axonsaga/api/orders' \
+  --header 'Content-Type: application/json' \
+  --data '{
+      "productId": "PROD-001",
+      "quantity": 2,
+      "price": 100,
+      "userId": "USER-001"
+  }'
+  ```
+  *(此時會產生第 1 個事件：`OrderCreatedEvent`)*
+
+* **查詢快照資料表**：
+  ```sql
+  SELECT * FROM my_database.snapshot_event_entry;
+  ```
+  * **預期結果**：此時事件數為 1（未達到閾值 2），快照表中應查無該訂單的記錄。
+
+* **對該訂單發送付款確認請求**（將訂單推送到下一步驟，觸發庫存預留與付款啟動等後續事件）：
+  ```bash
+  curl --location 'http://localhost:8081/axonsaga/api/orders/pay' \
+  --header 'Content-Type: application/json' \
+  --data '{
+      "orderId": "{orderId}"
+  }'
+  ```
+  *(當 Saga 處理時，會觸發 ConfirmStockReservedCommand 並發布第 2 個事件：`OrderStockReservedEvent`，此時事件累積數達到 2，自動觸發快照生成)*
+
+### 3. 驗證資料庫快照
+* **再次查詢快照資料表**：
+  ```sql
+  SELECT aggregate_identifier, version, serialized_payload FROM my_database.snapshot_event_entry;
+  ```
+  * **預期結果**：查得一筆 `aggregate_identifier` 為 `{orderId}`，`version` 為 `1` 的快照記錄，說明快照已成功持久化。
+
+### 4. 驗證快照載入
+* **發送查詢訂單請求**：
+  ```bash
+  curl --location 'http://localhost:8081/axonsaga/api/orders/{orderId}'
+  ```
+* **驗證日誌輸出**：
+  在服務控制台日誌中，您會看到 Axon 嘗試重建聚合時，會從快照載入而不是從頭重放所有事件。

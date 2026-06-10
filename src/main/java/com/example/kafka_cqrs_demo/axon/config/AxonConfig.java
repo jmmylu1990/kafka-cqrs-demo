@@ -20,6 +20,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.axonframework.eventhandling.tokenstore.TokenStore;
 import org.axonframework.eventhandling.tokenstore.jpa.JpaTokenStore;
+import org.axonframework.eventsourcing.EventCountSnapshotTriggerDefinition;
+import org.axonframework.eventsourcing.SnapshotTriggerDefinition;
+import org.axonframework.eventsourcing.Snapshotter;
 
 /**
  * Axon 框架專用配置類別 (Axon Configuration)
@@ -106,5 +109,14 @@ public class AxonConfig {
                 .entityManagerProvider(entityManagerProvider)
                 .serializer(serializer)
                 .build();
+    }
+
+    /**
+     * 配置訂單聚合根的事件快照觸發定義。
+     * 設定每產生 2 次事件時，自動產生一次快照並持久化至資料庫。
+     */
+    @Bean
+    public SnapshotTriggerDefinition orderAggregateSnapshotTriggerDefinition(Snapshotter snapshotter) {
+        return new EventCountSnapshotTriggerDefinition(snapshotter, 2);
     }
 }

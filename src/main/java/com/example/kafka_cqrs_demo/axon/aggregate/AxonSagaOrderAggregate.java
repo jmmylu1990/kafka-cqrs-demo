@@ -11,6 +11,8 @@ import com.example.kafka_cqrs_demo.axon.event.OrderCreatedEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderPaidEvent;
 import com.example.kafka_cqrs_demo.axon.event.OrderStockReservedEvent;
 import com.example.kafka_cqrs_demo.axon.event.PaymentStartedEvent;
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.CommandHandler;
 import org.axonframework.eventsourcing.EventSourcingHandler;
@@ -29,7 +31,9 @@ import static org.axonframework.modelling.command.AggregateLifecycle.apply;
  * </p>
  */
 @Slf4j
-@Aggregate
+@Getter
+@JsonAutoDetect(fieldVisibility = JsonAutoDetect.Visibility.ANY)
+@Aggregate(snapshotTriggerDefinition = "orderAggregateSnapshotTriggerDefinition")
 public class AxonSagaOrderAggregate {
 
     /**
