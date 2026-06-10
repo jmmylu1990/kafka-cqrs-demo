@@ -30,6 +30,9 @@
   * **過期限制**：訂單建立寫入 Redis 時設定生存時間 (TTL) 為 1 天，防止歷史垃圾數據無限期吞噬快取伺服器記憶體。
   * **失效快取**：當訂單狀態變更時，改用 Cache Eviction 直接刪除 Redis 快取 Key，完美規避因網路延遲等並發時序錯亂造成的舊資料覆蓋新資料（快取髒數據）問題。
   * **快取延遲載入**：查詢端實現 **Cache-Aside 模式**，當 Redis 未命中時，自動向 MySQL 載入並重設 1 天 TTL 回寫快取。
+* **Saga 分散式持久化超時與自癒機制 (Saga Timeout & Lifecycle Management)**：
+  * **超時自癒**：在 `OrderSaga` 中引入 `DeadlineManager`。在新訂單建立時，自動向資料庫註冊一個 15 分鐘的 `payment-deadline` 超時任務。若 15 分鐘內未收到付款確認事件，將自動觸發超時補償機制，釋放預留庫存並取消訂單。
+  * **分散式持久化**：重構為基於 MySQL `QRTZ_*` 表格的 **`QuartzDeadlineManager`**。即使服務在此期間斷電、重啟或有多個執行個體部署，超時任務也不會遺失，且能在重啟時精確補償，確保資料的一致性與系統的自癒力。
 * **Kafka 消費端異常重試與死信佇列 (DLQ)**：
   * **通用異常處理器**：配置 Spring Kafka `CommonErrorHandler`，針對資料庫連線、併發鎖衝突等暫時性異常，自動進行 3 次重試（間隔 1 秒）。重試失敗後，將訊息投遞到 `inventory-sync-events.DLQ`。
   * **快速失敗與死信**：將 JSON 反序列化解析錯誤 (JsonProcessingException) 設定為不可重試異常，略過重試直接送入死信佇列。
@@ -415,3 +418,51 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 * **備註**：
   * 在 [InventoryKafkaConfig.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/axon/config/InventoryKafkaConfig.java) 中，我們另外編寫並註解保留了自訂目的地的 `TopicPartition` 轉發解析器。若將該區塊取消註解，死信會被強制送至 `inventory-sync-events.DLQ` 分區 0，進而能直接觸發專屬的 DLQ 簡訊警報監聽器並印出 `[ALERT] [SMS GATEWAY] 警報...` 的警報日誌。
+
+---
+
+### 場景五：Saga 支付超時自癒與應用重啟任務恢復測試
+
+本測試驗證：當建立訂單後在付款截止前發生「應用斷電/當機」，當系統重啟時能藉由 MySQL 上的 Quartz 持久化任務順利觸發過期的超時補償機制。
+
+#### 1. 準備測試設定
+* 暫時將 [OrderSaga.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/axon/saga/OrderSaga.java) 中的付款超時時間設定為較短的時間（例如 20 秒）方便測試：
+  `deadlineManager.schedule(Duration.ofSeconds(20), "payment-deadline", event.getOrderId());`
+
+#### 2. 發送建立訂單請求 (購買 PROD-001 數量 2 件)
+```bash
+curl --location 'http://localhost:8081/axonsaga/api/orders' \
+--header 'Content-Type: application/json' \
+--data '{
+    "productId": "PROD-001",
+    "quantity": 2,
+    "price": 100,
+    "userId": "USER-001"
+}'
+```
+*(記錄 API 回傳的 `{orderId}`，此時可用庫存已在 Redis 被扣減 2 件並記錄為預留)*
+
+#### 3. 模擬當機：立即停止 Spring Boot 應用程式
+* 在 5 秒內強制終止運行的 Spring Boot 服務（`kill -9 {PID}`）。
+
+#### 4. 驗證 Quartz 任務持久化至資料庫
+* 連線至 MySQL 資料庫執行以下 SQL：
+  ```sql
+  SELECT * FROM my_database.QRTZ_TRIGGERS;
+  ```
+* **預期結果**：將查得一筆包含 `TRIGGER_GROUP` 為 `DEFAULT`、`JOB_GROUP` 為 `payment-deadline` 且狀態為 `WAITING` 的記錄，這表明超時截止任務已被成功持久化。
+
+#### 5. 模擬重啟：等待 25 秒以上並重新啟動應用程式
+* 確保已超過剛才設定的 20 秒超時限度，然後啟動 Spring Boot 服務。
+* **驗證控制台日誌**：
+  在服務啟動後，Quartz 會立即偵測到過期的任務並觸發，控制台應輸出以下補償與自癒軌跡：
+  ```text
+  INFO --- [quartzScheduler] o.a.c.d.q.QuartzDeadlineManager  : Triggering deadline [payment-deadline] with id [...] for scope [OrderSaga]
+  INFO --- [agaProcessor]-0] c.e.kafka_cqrs_demo.axon.saga.OrderSaga  : [Saga] 訂單 {orderId} 付款截止逾時，觸發取消補償流程
+  INFO --- [agaProcessor]-0] c.e.k.a.a.AxonSagaOrderAggregate         : [EventSourcingHandler] 訂單狀態變更為已取消 (CANCELLED)，原因: 付款截止逾時，自動釋放庫存
+  INFO --- [agaProcessor]-0] c.e.k.axon.service.InventoryService      : [InventoryService] 已發送庫存釋放同步訊息至 Kafka: orderId={orderId}, productId=PROD-001
+  ```
+* **驗證 Redis/MySQL 狀態**：
+  * **Redis 快取**：可用庫存自動退回，且 reservation 狀態變更為 `RELEASED`。
+  * **MySQL 資料庫**：`t_axon_order` 狀態被自動更新為 `CANCELLED`，且可用/預留庫存自動歸位。
+* **復原設定**：測試完成後，請確保將 [OrderSaga.java](file:///Users/vanliou/Desktop/sideproject/kafka-cqrs-demo/src/main/java/com/example/kafka_cqrs_demo/axon/saga/OrderSaga.java) 中的時間設定恢復為生產環境預設的 `Duration.ofMinutes(15)`。

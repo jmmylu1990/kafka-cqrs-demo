@@ -10,7 +10,8 @@ import org.axonframework.config.Configuration;
 import org.axonframework.config.ConfigurationScopeAwareProvider;
 import org.axonframework.config.ConfigurerModule;
 import org.axonframework.deadline.DeadlineManager;
-import org.axonframework.deadline.SimpleDeadlineManager;
+import org.axonframework.deadline.quartz.QuartzDeadlineManager;
+import org.quartz.Scheduler;
 import org.axonframework.eventsourcing.eventstore.EventStorageEngine;
 import org.axonframework.eventsourcing.eventstore.jpa.JpaEventStorageEngine;
 import org.axonframework.serialization.Serializer;
@@ -32,11 +33,16 @@ import org.axonframework.eventhandling.tokenstore.jpa.JpaTokenStore;
 public class AxonConfig {
 
     /**
-     * 配置系統內建的逾時管理器 SimpleDeadlineManager。
+     * 配置基於 Quartz 的分散式逾時管理器 QuartzDeadlineManager。
      */
     @Bean
-    public DeadlineManager deadlineManager(Configuration configuration, TransactionManager transactionManager) {
-        return SimpleDeadlineManager.builder()
+    public DeadlineManager deadlineManager(Scheduler scheduler,
+                                           Configuration configuration,
+                                           TransactionManager transactionManager,
+                                           @Qualifier("eventSerializer") Serializer serializer) {
+        return QuartzDeadlineManager.builder()
+                .scheduler(scheduler)
+                .serializer(serializer)
                 .scopeAwareProvider(new ConfigurationScopeAwareProvider(configuration))
                 .transactionManager(transactionManager)
                 .build();

@@ -6,6 +6,21 @@ spring:
     name: kafka-cqrs-demo
 
   # =========================================================================
+  # 5. Quartz 分散式定時任務排程配置 (Quartz Scheduler Configuration)
+  # =========================================================================
+  quartz:
+    job-store-type: jdbc
+    jdbc:
+      initialize-schema: always
+      schema: classpath:custom-quartz-schema.sql
+    properties:
+      org:
+        quartz:
+          jobStore:
+            driverDelegateClass: org.quartz.impl.jdbcjobstore.StdJDBCDelegate
+            tablePrefix: QRTZ_
+
+  # =========================================================================
   # 1. 關聯式資料庫連線配置 (MySQL Datasource Configuration)
   # =========================================================================
   datasource:
