@@ -85,7 +85,7 @@ public class OrderSaga {
      */
     @SagaEventHandler(associationProperty = "orderId")
     public void handle(StockReservedEvent event) {
-        log.info("[Saga] 庫存預留成功，訂單 {} 進入待付款狀態，發送確認確認指令", event.getOrderId());
+        log.info("[Saga] 庫存預留成功，訂單 {} 進入待付款狀態，發送確認指令", event.getOrderId());
 
         // 發送確認指令更新訂單狀態
         commandGateway.send(new ConfirmStockReservedCommand(event.getOrderId()));
@@ -155,6 +155,13 @@ public class OrderSaga {
 
     /**
      * 處理付款流程開始事件。
+     * <p>
+     * 當使用者發起付款且訂單狀態驗證無誤後，系統會發布 PaymentStartedEvent。
+     * 本方法在監聽到該事件後，會透過 CommandGateway 發送 DebitWalletCommand 指令，
+     * 驅動錢包服務執行實質的扣款操作。
+     * </p>
+     *
+     * @param event 包含訂單與付款金額等資訊的付款開始事件
      */
     @SagaEventHandler(associationProperty = "orderId")
     public void handle(PaymentStartedEvent event) {
@@ -165,6 +172,12 @@ public class OrderSaga {
 
     /**
      * 處理錢包扣款成功事件。
+     * <p>
+     * 當錢包服務成功扣除用戶款項並發布 WalletDebitedEvent 時，此處理器會被觸發。
+     * 本步驟會向訂單聚合發送 ConfirmPaymentCommand 指令，以確認付款並將訂單狀態正式更新為已付款 (PAID)。
+     * </p>
+     *
+     * @param event 錢包扣款成功事件
      */
     @SagaEventHandler(associationProperty = "orderId")
     public void handle(WalletDebitedEvent event) {
@@ -174,6 +187,13 @@ public class OrderSaga {
 
     /**
      * 處理錢包扣款失敗事件。
+     * <p>
+     * 當錢包餘額不足或外部扣款發生異常時，會發布 WalletDebitFailedEvent。
+     * 此時 Saga 會自動執行補償邏輯，發送 CancelOrderCommand 以便在訂單聚合中取消此筆訂單，
+     * 並退回先前預留的庫存，以保障分散式交易的最終一致性。
+     * </p>
+     *
+     * @param event 錢包扣款失敗事件
      */
     @SagaEventHandler(associationProperty = "orderId")
     public void handle(WalletDebitFailedEvent event) {

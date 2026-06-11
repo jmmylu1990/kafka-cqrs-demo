@@ -35,7 +35,7 @@ import java.util.UUID;
  * 金流防腐層適配器 (Payment Adapter - Anti-Corruption Layer)
  * <p>
  * 本適配器將 Axon 的異步事件驅動 Command/Event 與外部金流系統的同步 HTTP 呼叫進行橋接。
- * 1. 接收 DebitWalletCommand 扣款指令，並發送 HTTP POST 請求至外部模擬扣款 API，若網路异常或超時自動進行重試，失敗則發布成功/失敗領域事件。
+ * 1. 接收 DebitWalletCommand 扣款指令，並發送 HTTP POST 請求至外部模擬扣款 API，若網路異常或超時自動進行重試，失敗則發布成功/失敗領域事件。
  * 2. 接收 RefundWalletCommand 退款指令，並透過 HTTP 進行外部退款，失敗時持久化寫入退款重試任務表。
  * 3. 監聽 OrderCancelledEvent 訂單取消事件，對先前扣款成功的交易自動透過 HTTP 呼叫外部 API 進行退款補償，失敗時寫入重試任務表。
  * </p>

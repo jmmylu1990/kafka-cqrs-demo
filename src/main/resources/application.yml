@@ -6,7 +6,7 @@ spring:
     name: kafka-cqrs-demo
 
   # =========================================================================
-  # 5. Quartz 分散式定時任務排程配置 (Quartz Scheduler Configuration)
+  # 1. Quartz 分散式定時任務排程配置 (Quartz Scheduler Configuration)
   # =========================================================================
   quartz:
     job-store-type: jdbc
@@ -21,7 +21,7 @@ spring:
             tablePrefix: QRTZ_
 
   # =========================================================================
-  # 1. 關聯式資料庫連線配置 (MySQL Datasource Configuration)
+  # 2. 關聯式資料庫連線配置 (MySQL Datasource Configuration)
   # =========================================================================
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -37,7 +37,7 @@ spring:
       connection-timeout: 20000 # 取得資料庫連線的等待超時時間上限為 20 秒
 
   # =========================================================================
-  # 2. JPA 與 Hibernate 實體管理配置 (JPA & Hibernate Configuration)
+  # 3. JPA 與 Hibernate 實體管理配置 (JPA & Hibernate Configuration)
   # =========================================================================
   jpa:
     database-platform: org.hibernate.dialect.MySQLDialect
@@ -49,7 +49,7 @@ spring:
         format_sql: false     # 關閉格式化輸出 SQL
 
   # =========================================================================
-  # 3. Kafka 分散式佇列與訊息重試機制配置 (Kafka Configuration)
+  # 4. Kafka 分散式佇列與訊息重試機制配置 (Kafka Configuration)
   # =========================================================================
   kafka:
     bootstrap-servers: localhost:9092
@@ -81,7 +81,7 @@ spring:
           multiplier: 2.0     # 退避乘數設定為 2 倍，代表後續的重試延遲時間會成倍增長
 
 # =========================================================================
-# 4. Axon Framework 分散式系統與事件溯源配置 (Axon Configuration)
+# 5. Axon Framework 分散式系統與事件溯源配置 (Axon Configuration)
 # =========================================================================
 axon:
   axonserver:

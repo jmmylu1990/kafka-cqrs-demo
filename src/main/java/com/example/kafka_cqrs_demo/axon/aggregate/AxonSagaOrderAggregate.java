@@ -124,7 +124,7 @@ public class AxonSagaOrderAggregate {
      * 2. 若訂單狀態不為 PENDING_PAYMENT，表示該訂單尚未預扣庫存，或是處於已付款、已取消等狀態。
      * 3. 若狀態檢查不通過，將會拋出例外以拒絕此付款指令，防止重複付款或無效付款。
      *
-     * @param command 包含付款確認資訊 of the instruction
+     * @param command 包含付款確認資訊的指令
      * @throws IllegalStateException 當訂單狀態不符合付款條件時拋出
      */
     @CommandHandler

@@ -436,7 +436,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 ---
 
-## ⚡ 訂單快取過期與失效快取 (Cache-Aside) 驗證流程
+## 訂單快取過期與失效快取 (Cache-Aside) 驗證流程
 
 本測試驗證：訂單建立時具備 1 天 TTL；狀態更新時快取會被直接刪除；查詢未命中時能自動回寫快取。
 
@@ -491,7 +491,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 ---
 
-## 🛠 Kafka 消費端重試與死信佇列 (DLQ) 驗證流程
+## Kafka 消費端重試與死信佇列 (DLQ) 驗證流程
 
 本測試驗證：非暫時性異常（毒藥丸）直接進 DLQ；暫時性資料庫連線失敗時重試 3 次，失敗後進入 DLQ 並發送警報。
 
@@ -680,7 +680,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 ---
 
-## ⚡ 防範快取擊穿 (Double-Checked Locking) 驗證流程
+## 防範快取擊穿 (Double-Checked Locking) 驗證流程
 
 本測試驗證：商品與訂單在快取未命中時，透過 Double-Checked Locking (DCL) 機制，是否能安全地阻止多個請求穿透至 MySQL。同時，也驗證了當訂單扣庫面臨「冷商品」時，是否能透過 DCL 動態將商品庫存載入 Redis，避免下單失敗。
 
@@ -734,7 +734,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 ---
 
-## ⚡ 商品冷熱分離快取策略驗證流程
+## 商品冷熱分離快取策略驗證流程
 
 本測試驗證：系統啟動時只會預熱熱商品；冷商品預設不在 Redis，但查詢或下單時會動態載入且僅有 60 秒生命週期。
 
@@ -786,7 +786,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 ---
 
-## ⚡ Outbox Pattern (發件箱模式) 驗證流程
+## Outbox Pattern (發件箱模式) 驗證流程
 
 本測試驗證：傳統模式建立訂單時，訂單寫入與 Outbox 紀錄包裹在同一個本地資料庫交易中。在正常情況下利用交易提交 Hook (Post-Commit) 進行極低延遲發送至 Kafka；並在 Kafka 異常時，透過背景輪詢排程器進行自癒重試，保證訊息 At-Least-Once Delivery。
 
@@ -877,7 +877,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 ---
 
-## ⚡ 庫存與預留記錄對帳與自癒 (Reconciliation) 驗證流程
+## 庫存與預留記錄對帳與自癒 (Reconciliation) 驗證流程
 
 本測試驗證：背景定時或手動觸發對帳自癒排程時，若 Redis 與 MySQL（Source of Truth）之間的可用庫存、預留庫存或訂單預留狀態因網路、當機等原因產生偏差，系統將自動比對並校正寫回 Redis 快取。
 
@@ -924,7 +924,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 ---
 
-## 📊 可觀測性監控面板與高併發壓測驗證 (Prometheus + Grafana + ab)
+## 可觀測性監控面板與高併發壓測驗證 (Prometheus + Grafana + ab)
 
 專案已成功整合 **Spring Boot Actuator + Micrometer**，暴露 Prometheus 指標，並在 Docker 容器中建立 Prometheus 與 Grafana 監控 Dashboard，將系統在高併發與分散式架構下的實際效能進行視覺化呈現。
 

@@ -7,12 +7,12 @@ import lombok.NoArgsConstructor;
 import java.io.Serializable;
 
 /**
-2:  * 庫存非同步同步事件 (Inventory Sync Event)
-3:  * <p>
-4:  * 用於在 Redis 庫存扣減或釋放成功後，作為 Kafka 訊息發送，
-5:  * 由背景消費者監聽並異步寫回 MySQL 資料庫，以達到最終一致性。
-6:  * </p>
-7:  */
+ * 庫存非同步同步事件 (Inventory Sync Event)
+ * <p>
+ * 用於在 Redis 庫存扣減或釋放成功後，作為 Kafka 訊息發送，
+ * 由背景消費者監聽並異步寫回 MySQL 資料庫，以達到最終一致性。
+ * </p>
+ */
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
