@@ -81,7 +81,7 @@ stateDiagram-v2
     state PENDING_PAYMENT {
         [*] --> 等待付款
         等待付款 --> 逾時未付: Deadline payment-deadline 觸發
-        等待付款 --> 收到付款請求: POST /{orderId}/pay -> ProcessPaymentCommand
+        等待付款 --> 收到付款請求: POST /pay -> ProcessPaymentCommand
     }
     
     逾時未付 --> CANCELLED: 發送 CancelOrderCommand (狀態: 付款超時)
@@ -297,7 +297,13 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 #### 3. 對該訂單發送付款確認請求
 ```bash
-curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/{orderId}/pay'
+curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/pay' \
+--header 'Content-Type: application/json' \
+--data '{
+    "orderId": "{orderId}",
+    "paymentMethod": "CREDIT_CARD",
+    "userId": "USER-001"
+}'
 ```
 
 #### 4. 第二階段：檢查付款完成，預留庫存扣減，金額被扣除
@@ -342,7 +348,13 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 #### 2. 送出付款確認請求
 ```bash
-curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/{orderId}/pay?userId=USER-002'
+curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/pay' \
+--header 'Content-Type: application/json' \
+--data '{
+    "orderId": "{orderId}",
+    "paymentMethod": "CREDIT_CARD",
+    "userId": "USER-002"
+}'
 ```
 
 #### 3. 第三階段：檢查扣款失敗，庫存安全退回
@@ -464,7 +476,13 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 當對該訂單發送付款確認請求以變更其狀態：
 * **送出付款確認請求**：
   ```bash
-  curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/{orderId}/pay'
+  curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/pay' \
+  --header 'Content-Type: application/json' \
+  --data '{
+      "orderId": "{orderId}",
+      "paymentMethod": "CREDIT_CARD",
+      "userId": "USER-001"
+  }'
   ```
 * **檢查 Redis 快取 Key 是否已被刪除**：
   ```bash
@@ -659,7 +677,13 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 
 * **對該訂單發送付款確認請求**（將訂單推送到下一步驟，觸發庫存預留與付款啟動等後續事件）：
   ```bash
-  curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/{orderId}/pay'
+  curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/pay' \
+  --header 'Content-Type: application/json' \
+  --data '{
+      "orderId": "{orderId}",
+      "paymentMethod": "CREDIT_CARD",
+      "userId": "USER-001"
+  }'
   ```
   *(當 Saga 處理時，會觸發 ConfirmStockReservedCommand 並發布第 2 個事件：`OrderStockReservedEvent`，此時事件累積數達到 2，自動觸發快照生成)*
 

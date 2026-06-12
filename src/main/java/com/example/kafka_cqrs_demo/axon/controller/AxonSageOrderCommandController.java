@@ -5,6 +5,7 @@ import com.example.kafka_cqrs_demo.axon.command.CancelOrderCommand;
 import com.example.kafka_cqrs_demo.axon.command.ConfirmPaymentCommand;
 import com.example.kafka_cqrs_demo.axon.command.ProcessPaymentCommand;
 import com.example.kafka_cqrs_demo.legacy.command.dto.CreateOrderRequest;
+import com.example.kafka_cqrs_demo.axon.dto.PayOrderRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.gateway.CommandGateway;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -92,14 +93,16 @@ public class AxonSageOrderCommandController {
     /**
      * 處理付款確認的 REST API 請求。
      *
-     * @param orderId 訂單唯一識別碼
-     * @param userId 選擇性傳入的付款人 ID
+     * @param request 包含付款確認資訊的請求 DTO
      * @return 包含付款處理結果的 ResponseEntity
      */
-    @PostMapping("/{orderId}/pay")
-    public ResponseEntity<Map<String, Object>> payOrder(@PathVariable String orderId,
-                                                        @RequestParam(required = false, defaultValue = "USER-001") String userId) {
-        log.info("接收到訂單付款請求，訂單 ID: {}, 使用者 ID: {}", orderId, userId);
+    @PostMapping("/pay")
+    public ResponseEntity<Map<String, Object>> payOrder(@RequestBody PayOrderRequest request) {
+        String orderId = request.getOrderId();
+        String userId = request.getUserId() != null && !request.getUserId().isBlank()
+                ? request.getUserId()
+                : "USER-001";
+        log.info("接收到訂單付款請求，訂單 ID: {}, 使用者 ID: {}, 付款方式: {}", orderId, userId, request.getPaymentMethod());
         
         // 1. 異步發送 Command，不阻塞等待背景 Saga/金流 API 處理
         commandGateway.send(new ProcessPaymentCommand(orderId, userId));
