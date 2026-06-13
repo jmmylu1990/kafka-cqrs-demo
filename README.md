@@ -33,7 +33,7 @@
 * **訂單快取 1 天 TTL 與快取失效 (Cache Eviction) 機制**：
   * **過期限制**：訂單建立寫入 Redis 時設定生存時間 (TTL) 為 1 天，防止歷史垃圾數據無限期吞噬快取伺服器記憶體。
   * **失效快取**：當訂單狀態變更時，改用 Cache Eviction 直接刪除 Redis 快取 Key，完美規避因網路延遲等並發時序錯亂造成的舊資料覆蓋新資料（快取髒數據）問題。
-  * **快取延遲載入**：查詢端實現 **Cache-Aside 模式**，當 Redis 未命中時，自動向 MySQL 載入並重設 1 天 TTL 回寫快取。
+  * **快取延遲載入與 SOLID 解耦**：查詢端實現 **Cache-Aside 模式**。為了落實單一職責原則 (SRP) 與依賴反轉原則 (DIP)，已將原先控制器的 DCL 快取防禦鎖、MySQL 降級查詢、Jackson 序列化與 Metrics 計數等底層細節完全抽離，封裝於獨立的 `OrderQueryService` 與實作中，Controller 僅做服務委派。
 * **Saga 分散式持久化超時與自癒機制 (Saga Timeout & Lifecycle Management)**：
   * **超時自癒**：在 `OrderSaga` 中引入 `DeadlineManager`。在新訂單建立時，自動向資料庫註冊一個 15 分鐘的 `payment-deadline` 超時任務。若 15 分鐘內未收到付款確認事件，將自動觸發超時補償機制，釋放預留庫存並取消訂單。
   * **分散式持久化**：重構為基於 MySQL `QRTZ_*` 表格的 **`QuartzDeadlineManager`**。即使服務在此期間斷電、重啟或有多個執行個體部署，超時任務也不會遺失，且能在重啟時精確補償，確保資料的一致性與系統的自癒力。
