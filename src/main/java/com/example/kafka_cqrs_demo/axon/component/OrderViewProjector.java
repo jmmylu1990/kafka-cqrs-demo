@@ -75,16 +75,18 @@ public class OrderViewProjector {
             log.error("[Projection] 同步至 MySQL 失敗: {}", e.getMessage(), e);
         }
 
-        // 2. 同步至 Redis 快取 (設定 1 天過期 TTL)
+        // 2. 同步至 Redis 快取 (設定 1 天 + 隨機過期 TTL 防範雪崩)
         try {
             ObjectNode node = objectMapper.valueToTree(event);
             node.put("status", OrderStatus.CREATED.name());
 
             String key = "order:" + event.getOrderId();
-            redisTemplate.opsForValue().set(key, node.toString(), 1, TimeUnit.DAYS);
+            long randomMinutes = java.util.concurrent.ThreadLocalRandom.current().nextLong(60);
+            long ttlMinutes = 24 * 60 + randomMinutes;
+            redisTemplate.opsForValue().set(key, node.toString(), ttlMinutes, TimeUnit.MINUTES);
             redisTemplate.opsForSet().add("orders:all", event.getOrderId());
 
-            log.info("[Projection] Redis 訂單 {} 寫入成功 (TTL 1 天)", event.getOrderId());
+            log.info("[Projection] Redis 訂單 {} 寫入成功 (TTL {} 分鐘)", event.getOrderId(), ttlMinutes);
         } catch (Exception e) {
             log.error("[Projection] 同步至 Redis 失敗: {}", e.getMessage(), e);
         }

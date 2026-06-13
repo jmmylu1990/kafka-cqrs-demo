@@ -30,10 +30,14 @@
 * **Kafka 最終一致性同步與寫入優化**：
   * Redis 扣減或釋放成功後，發送 `InventorySyncEvent` 訊息至 Kafka `inventory-sync-events` 主題，以 **`productId`** 作為 Partition Key，保證同一商品的所有更新序列化在同一個分割區，避免跨執行緒資料庫寫入競爭。
   * **背景 Consumer 與策略模式解耦 (OCP)**：背景 Consumer 異步落庫寫回 MySQL，並實作 **JPA 樂觀鎖 (`@Version`)** 防護與 **衝突自動重試機制**，確保最終一致性的絕對安全。為了落實開放封閉原則 (OCP)，本專案已導入**策略模式 (Strategy Pattern)**，將庫存預留、確認扣減、釋放、退款等具體同步業務完全拆分、封裝至獨立的 `InventorySyncHandler` 策略實作中，消除冗長的 `switch-case` 分流，擴充新同步動作時不需修改消費端主類別。
-* **訂單快取 1 天 TTL 與快取失效 (Cache Eviction) 機制**：
-  * **過期限制**：訂單建立寫入 Redis 時設定生存時間 (TTL) 為 1 天，防止歷史垃圾數據無限期吞噬快取伺服器記憶體。
+* **訂單快取 TTL、防雪崩抖動與快取失效 (Cache Eviction & Avalanche Protection) 機制**：
+  * **過期限制與防雪崩抖動**：訂單寫入 Redis 時，為防範**快取雪崩**（大量 Key 同時過期），在 1 天（24 小時）的基礎上隨機疊加 **0~60 分鐘的抖動時間 (Jitter)**，離散過期時間，並避免歷史垃圾數據無限期吞噬快取伺服器記憶體。
   * **失效快取**：當訂單狀態變更時，改用 Cache Eviction 直接刪除 Redis 快取 Key，完美規避因網路延遲等並發時序錯亂造成的舊資料覆蓋新資料（快取髒數據）問題。
   * **快取延遲載入與 SOLID 解耦**：查詢端實現 **Cache-Aside 模式**。為了落實單一職責原則 (SRP) 與依賴反轉原則 (DIP)，已將原先控制器的 DCL 快取防禦鎖、MySQL 降級查詢、Jackson 序列化與 Metrics 計數等底層細節完全抽離，封裝於獨立的 `OrderQueryService` 與實作中，Controller 僅做服務委派。
+* **防範快取擊穿、穿透與動態快取載入 (Double-Checked Locking & Penetration Protection)**：
+  * **防快取擊穿**：在訂單與商品查詢端實作 Double-Checked Locking 機制，當 Redis 快取未命中時，使用 Redisson 分散式鎖進行併發防護，確保只有一個執行緒去 MySQL 查詢並回寫 Redis，避免海量請求同時穿透資料庫。
+  * **防快取穿透 (空值快取)**：查詢不存在的訂單 ID 時，快取端會將值為 `"NULL"` 的防穿透標記寫入 Redis，並設定短效的 **5 分鐘 TTL**。後續請求若命中該標記則直接回傳訂單不存在，不再穿透查詢資料庫，徹底瓦解惡意查詢攻擊。
+  * **冷商品動態載入**：在庫存預留端 (Command Side)，若 Redis 快取未命中（模擬冷商品），自動在商品鎖的保護下進行 DCL 載入，將 MySQL 的最新庫存與預留數據同步至 Redis，保證冷商品也能順利下單，為商品的冷熱分離提供底層支持。
 * **Saga 分散式持久化超時與自癒機制 (Saga Timeout & Lifecycle Management)**：
   * **超時自癒**：在 `OrderSaga` 中引入 `DeadlineManager`。在新訂單建立時，自動向資料庫註冊一個 15 分鐘的 `payment-deadline` 超時任務。若 15 分鐘內未收到付款確認事件，將自動觸發超時補償機制，釋放預留庫存並取消訂單。
   * **分散式持久化**：重構為基於 MySQL `QRTZ_*` 表格的 **`QuartzDeadlineManager`**。即使服務在此期間斷電、重啟或有多個執行個體部署，超時任務也不會遺失，且能在重啟時精確補償，確保資料的一致性與系統的自癒力。
@@ -481,7 +485,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
   ```bash
   redis-cli TTL order:{orderId}
   ```
-  * **預期結果**：回傳值應為一個接近 `86400` 的正整數（代表已成功設定為 1 天過期，不再是永久留存）。
+  * **預期結果**：回傳值應為一個接近 `86400` ~ `90000` 之間的正整數（代表已成功設定為 1 天 + 隨機過期抖動，不再是永久留存）。
 
 ### 2. 變更訂單狀態，驗證快取失效 (Eviction)
 當對該訂單發送付款確認請求以變更其狀態：
@@ -509,14 +513,14 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 * **驗證控制台日誌輸出**：
   您應該會在控制台看到以下依序輸出的日誌：
   ```text
-  [Projection] Redis 快取未命中 (Cache Miss)，嘗試從 MySQL 查詢: {orderId}
-  [Projection] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 1 天): {orderId}
+  [DCL] Redis 快取未命中且已獲取鎖，嘗試從 MySQL 查詢: {orderId}
+  [DCL] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 14xx 分鐘): {orderId}
   ```
 * **再次查詢 Redis 快取狀態**：
   ```bash
   redis-cli TTL order:{orderId}
   ```
-  * **預期結果**：快取 Key 再次存在，且 TTL 重新被更新設定為 `86400` 秒（1 天）。
+  * **預期結果**：快取 Key 再次存在，且 TTL 重新被更新設定為約 1 天的秒數（86400 ~ 90000 秒，包含隨機抖動）。
 
 ---
 
@@ -764,7 +768,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 * **驗證日誌輸出**：
   ```text
   [DCL] Redis 快取未命中且已獲取鎖，嘗試從 MySQL 查詢: {orderId}
-  [DCL] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 1 天): {orderId}
+  [DCL] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 14xx 分鐘): {orderId}
   ```
 
 ---

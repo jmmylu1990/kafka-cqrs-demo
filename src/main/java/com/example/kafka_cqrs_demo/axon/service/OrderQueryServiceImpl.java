@@ -51,6 +51,11 @@ public class OrderQueryServiceImpl implements OrderQueryService {
         String orderJson = redisTemplate.opsForValue().get(key);
 
         if (orderJson != null) {
+            if ("NULL".equals(orderJson)) {
+                log.info("快取命中防穿透標記 (NULL)，訂單 {} 不存在", orderId);
+                meterRegistry.counter("cache.requests", "type", "order", "result", "hit").increment();
+                return "訂單不存在";
+            }
             meterRegistry.counter("cache.requests", "type", "order", "result", "hit").increment();
         } else {
             // 2. 獲取 Redis 分散式鎖，防範快取擊穿
@@ -69,15 +74,24 @@ public class OrderQueryServiceImpl implements OrderQueryService {
                         if (orderOpt.isPresent()) {
                             AxonOrderEntity order = orderOpt.get();
                             orderJson = objectMapper.writeValueAsString(order);
-                            // 3. 回寫 Redis，設定 TTL 為 1 天
-                            redisTemplate.opsForValue().set(key, orderJson, 1, TimeUnit.DAYS);
-                            log.info("[DCL] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL 1 天): {}", orderId);
+                            // 3. 回寫 Redis，設定 TTL 為 1 天 + 隨機抖動 (24小時 ~ 25小時)
+                            long randomMinutes = java.util.concurrent.ThreadLocalRandom.current().nextLong(60);
+                            long ttlMinutes = 24 * 60 + randomMinutes;
+                            redisTemplate.opsForValue().set(key, orderJson, ttlMinutes, TimeUnit.MINUTES);
+                            log.info("[DCL] 從 MySQL 讀取成功並已回寫 Redis 快取 (TTL {} 分鐘): {}", ttlMinutes, orderId);
                             meterRegistry.counter("cache.requests", "type", "order", "result", "miss").increment();
                         } else {
-                            log.warn("[DCL] 訂單不存在，ID: {}", orderId);
+                            log.warn("[DCL] 訂單不存在，寫入防穿透空值快取 (TTL 5 分鐘)，ID: {}", orderId);
+                            redisTemplate.opsForValue().set(key, "NULL", 5, TimeUnit.MINUTES);
+                            meterRegistry.counter("cache.requests", "type", "order", "result", "miss").increment();
                             return "訂單不存在";
                         }
                     } else {
+                        if ("NULL".equals(orderJson)) {
+                            log.info("[DCL] 雙重檢查命中防穿透標記 (NULL): {}", orderId);
+                            meterRegistry.counter("cache.requests", "type", "order", "result", "hit").increment();
+                            return "訂單不存在";
+                        }
                         log.info("[DCL] 雙重檢查命中快取 (Double-Checked Cache Hit): {}", orderId);
                         meterRegistry.counter("cache.requests", "type", "order", "result", "hit").increment();
                     }
@@ -88,6 +102,11 @@ public class OrderQueryServiceImpl implements OrderQueryService {
                     orderJson = redisTemplate.opsForValue().get(key);
                     if (orderJson == null) {
                         return "系統繁忙，請稍後再試";
+                    }
+                    if ("NULL".equals(orderJson)) {
+                        log.info("退避重試後命中防穿透標記 (NULL): {}", orderId);
+                        meterRegistry.counter("cache.requests", "type", "order", "result", "hit").increment();
+                        return "訂單不存在";
                     }
                     meterRegistry.counter("cache.requests", "type", "order", "result", "hit").increment();
                 }
