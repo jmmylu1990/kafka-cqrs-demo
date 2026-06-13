@@ -234,6 +234,12 @@ TRUNCATE TABLE QRTZ_LOCKS;
 SET FOREIGN_KEY_CHECKS = 1;
 ```
 
+> [!WARNING]
+> **資料庫重置注意事項（特別是 Axon 相關表格）**：
+> * **`token_entry` 的重要性**：`token_entry` 表格用來記錄每個事件處理器（例如 `OrderSagaProcessor`）目前讀取到 `domain_event_entry`（事件儲存表）的哪一個位置（Index）。
+> * **「重置不完全」的影響**：如果您單獨清空了事件表 `domain_event_entry`，但**忘記清空**追蹤權杖表 `token_entry`，會導致處理器以為自己已經讀取到了前面的事件（例如第 2054 個）。當處理器重啟並回頭檢查時，發現前面 1 到 2051 個事件全部消失，Axon 會使用 `GapAwareTrackingToken` 將這些消失的序號全部判定為「空洞（Gaps）」，並在日誌中不斷輸出尋找 Gaps 的日誌警告。這將對 CPU 和記憶體造成無謂的損耗。
+> * **結論**：執行重置 SQL 時，**務必完整執行上述的所有 TRUNCATE 指令**（尤其是 `token_entry`），以確保權杖與事件同步歸零。
+
 ### 2. 清空 Redis 快取
 在終端機執行：
 ```bash
@@ -386,7 +392,12 @@ curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/pay' \
 
 #### 1. 發送取消請求
 ```bash
-curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/{場景一成功的orderId}/cancel?reason=售後七天無條件退貨'
+curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/cancel' \
+--header 'Content-Type: application/json' \
+--data '{
+    "orderId": "{場景一成功的orderId}",
+    "reason": "售後七天無條件退貨"
+}'
 ```
 
 #### 2. 第四階段：檢查錢包加回，Redis 可用庫存退回

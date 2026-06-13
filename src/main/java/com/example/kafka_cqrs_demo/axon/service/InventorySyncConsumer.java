@@ -38,9 +38,9 @@ public class InventorySyncConsumer {
     private final ObjectMapper objectMapper;
 
     public InventorySyncConsumer(AxonInventoryRepository inventoryRepository,
-                                 AxonStockReservationRepository reservationRepository,
-                                 AxonDlqMessageRepository dlqMessageRepository,
-                                 ObjectMapper objectMapper) {
+            AxonStockReservationRepository reservationRepository,
+            AxonDlqMessageRepository dlqMessageRepository,
+            ObjectMapper objectMapper) {
         this.inventoryRepository = inventoryRepository;
         this.reservationRepository = reservationRepository;
         this.dlqMessageRepository = dlqMessageRepository;
@@ -61,9 +61,10 @@ public class InventorySyncConsumer {
         InventorySyncEvent event = objectMapper.readValue(message, InventorySyncEvent.class);
 
         // 模擬資料庫暫時性連線失敗異常，用於驗證重試與 DLQ (僅對特定測試商品 PROD-DLQ-TEST 觸發)
-        if ("RESERVE".equals(event.getActionType()) && "PROD-DLQ-TEST".equals(event.getProductId())) {
-            throw new RuntimeException("模擬資料庫暫時性連線失敗");
-        }
+        // if ("RESERVE".equals(event.getActionType()) &&
+        // "PROD-DLQ-TEST".equals(event.getProductId())) {
+        // throw new RuntimeException("模擬資料庫暫時性連線失敗");
+        // }
         log.info("[InventorySyncConsumer] 解析事件成功: orderId={}, action={}", event.getOrderId(), event.getActionType());
 
         switch (event.getActionType()) {
@@ -87,26 +88,28 @@ public class InventorySyncConsumer {
     /**
      * 監聽死信佇列 (DLQ)，模擬發送警報簡訊並持久化記錄於資料庫中以支援一鍵重試。
      *
-     * @param message 進入死信佇列的原始訊息內容
+     * @param message          進入死信佇列的原始訊息內容
      * @param exceptionMessage 失敗例外原因說明
-     * @param originalTopic 原始訊息發送的主題
+     * @param originalTopic    原始訊息發送的主題
      */
     @KafkaListener(topics = InventoryKafkaConfig.INVENTORY_SYNC_DLQ_TOPIC, groupId = "inventory-dlq-group")
     @Transactional
     public void consumeDlq(String message,
-                           @Header(name = KafkaHeaders.DLT_EXCEPTION_MESSAGE, required = false) String exceptionMessage,
-                           @Header(name = KafkaHeaders.DLT_ORIGINAL_TOPIC, required = false) String originalTopic) {
-        log.error("[ALERT] [SMS GATEWAY] 警報：庫存同步訊息進入死信佇列 (DLQ)！已發送簡訊通知工程師人工排查。訊息內容: {}, 錯誤原因: {}", message, exceptionMessage);
+            @Header(name = KafkaHeaders.DLT_EXCEPTION_MESSAGE, required = false) String exceptionMessage,
+            @Header(name = KafkaHeaders.DLT_ORIGINAL_TOPIC, required = false) String originalTopic) {
+        log.error("[ALERT] [SMS GATEWAY] 警報：庫存同步訊息進入死信佇列 (DLQ)！已發送簡訊通知工程師人工排查。訊息內容: {}, 錯誤原因: {}", message,
+                exceptionMessage);
 
         // 將死信訊息寫入 MySQL 以供重試與審計
         AxonDlqMessageEntity dlqMessage = new AxonDlqMessageEntity(
                 UUID.randomUUID().toString(),
                 message,
                 originalTopic != null ? originalTopic : InventoryKafkaConfig.INVENTORY_SYNC_TOPIC,
-                exceptionMessage != null ? (exceptionMessage.length() > 500 ? exceptionMessage.substring(0, 500) : exceptionMessage) : "未知處理異常",
+                exceptionMessage != null
+                        ? (exceptionMessage.length() > 500 ? exceptionMessage.substring(0, 500) : exceptionMessage)
+                        : "未知處理異常",
                 "PENDING",
-                LocalDateTime.now()
-        );
+                LocalDateTime.now());
         dlqMessageRepository.save(dlqMessage);
     }
 
@@ -120,8 +123,7 @@ public class InventorySyncConsumer {
                 event.getProductId(),
                 event.getQuantity(),
                 "RESERVED",
-                LocalDateTime.now()
-        );
+                LocalDateTime.now());
         reservationRepository.save(reservation);
         log.info("[InventorySyncConsumer] MySQL 已建立預留記錄: orderId={}", event.getOrderId());
     }
@@ -159,7 +161,8 @@ public class InventorySyncConsumer {
                 reservationRepository.save(reservation);
 
                 // 退回可用庫存，扣減預留庫存 (具備樂觀鎖重試機制)
-                updateInventoryWithRetry(reservation.getProductId(), reservation.getQuantity(), -reservation.getQuantity());
+                updateInventoryWithRetry(reservation.getProductId(), reservation.getQuantity(),
+                        -reservation.getQuantity());
                 log.info("[InventorySyncConsumer] MySQL 已同步釋放預留 (RELEASE): orderId={}", event.getOrderId());
             } else {
                 log.info("[InventorySyncConsumer] MySQL 訂單 {} 預留狀態非 RESERVED ({})，忽略 RELEASE",

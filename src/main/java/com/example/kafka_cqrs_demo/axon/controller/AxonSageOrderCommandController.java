@@ -5,6 +5,7 @@ import com.example.kafka_cqrs_demo.axon.command.CancelOrderCommand;
 import com.example.kafka_cqrs_demo.axon.command.ConfirmPaymentCommand;
 import com.example.kafka_cqrs_demo.axon.command.ProcessPaymentCommand;
 import com.example.kafka_cqrs_demo.legacy.command.dto.CreateOrderRequest;
+import com.example.kafka_cqrs_demo.axon.dto.CancelOrderRequest;
 import com.example.kafka_cqrs_demo.axon.dto.PayOrderRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.axonframework.commandhandling.gateway.CommandGateway;
@@ -126,13 +127,15 @@ public class AxonSageOrderCommandController {
     /**
      * 處理取消訂單的 REST API 請求。
      *
-     * @param orderId 訂單唯一識別碼
-     * @param reason 取消原因
+     * @param request 包含取消訂單識別碼及原因的請求 DTO
      * @return 包含取消處理結果的 CompletableFuture 物件
      */
-    @PostMapping("/{orderId}/cancel")
-    public CompletableFuture<String> cancelOrder(@PathVariable String orderId,
-                                                 @RequestParam(required = false, defaultValue = "用戶取消") String reason) {
+    @PostMapping("/cancel")
+    public CompletableFuture<String> cancelOrder(@RequestBody CancelOrderRequest request) {
+        String orderId = request.getOrderId();
+        String reason = request.getReason() != null && !request.getReason().isBlank()
+                ? request.getReason()
+                : "用戶取消";
         log.info("接收到訂單取消請求，訂單 ID: {}, 原因: {}", orderId, reason);
         return commandGateway.send(new CancelOrderCommand(orderId, reason));
     }
