@@ -29,7 +29,7 @@
   * 在臨界區內執行 Redis `RBucket` 與 `RMap` 的原子庫存檢查、扣減與記錄，徹底防範高併發下的超賣問題，並利用 Watchdog 機制自動續期，防止鎖提前失效。
 * **Kafka 最終一致性同步與寫入優化**：
   * Redis 扣減或釋放成功後，發送 `InventorySyncEvent` 訊息至 Kafka `inventory-sync-events` 主題，以 **`productId`** 作為 Partition Key，保證同一商品的所有更新序列化在同一個分割區，避免跨執行緒資料庫寫入競爭。
-  * 背景 Consumer 異步落庫寫回 MySQL，並實作 **JPA 樂觀鎖 (`@Version`)** 防護與 **衝突自動重試機制**，確保最終一致性的絕對安全與極致寫入效能。
+  * **背景 Consumer 與策略模式解耦 (OCP)**：背景 Consumer 異步落庫寫回 MySQL，並實作 **JPA 樂觀鎖 (`@Version`)** 防護與 **衝突自動重試機制**，確保最終一致性的絕對安全。為了落實開放封閉原則 (OCP)，本專案已導入**策略模式 (Strategy Pattern)**，將庫存預留、確認扣減、釋放、退款等具體同步業務完全拆分、封裝至獨立的 `InventorySyncHandler` 策略實作中，消除冗長的 `switch-case` 分流，擴充新同步動作時不需修改消費端主類別。
 * **訂單快取 1 天 TTL 與快取失效 (Cache Eviction) 機制**：
   * **過期限制**：訂單建立寫入 Redis 時設定生存時間 (TTL) 為 1 天，防止歷史垃圾數據無限期吞噬快取伺服器記憶體。
   * **失效快取**：當訂單狀態變更時，改用 Cache Eviction 直接刪除 Redis 快取 Key，完美規避因網路延遲等並發時序錯亂造成的舊資料覆蓋新資料（快取髒數據）問題。
@@ -43,7 +43,7 @@
   * **死信落庫與警報**：設有 DLQ 監聽器，一旦訊息降級進入死信，除了模擬發送簡訊警報，亦會將死信內容持久化寫入 `t_axon_dlq_message` 資料表中，初始狀態為 `PENDING`。
   * **一鍵重試自癒 API**：提供 `POST /axonsaga/api/dlq/reprocess` 端點。當管理員觸發此 API 時，會從資料庫撈取所有 `PENDING` 死信，解析 JSON 以 `productId` 作為 Partition Key，重新投遞回主要主題 `inventory-sync-events`，保證同商品事件的順序性。重處理成功後，將死信狀態變更為 `REPROCESSED`。
 * **模擬外部金流防腐層 (PaymentAdapter/ACL) 與超時/失敗自癒重試機制**：
-  * **金流解耦**：移除本地資料庫強耦合，解耦為獨立外部金流 API (`MockExternalPaymentController`)。
+  * **金流解耦與依賴反轉 (DIP)**：移除本地資料庫強耦合，解耦為獨立外部金流 API (`MockExternalPaymentController`)。為了落實依賴反轉原則 (DIP)，已將原先 `PaymentAdapter` 中手動 `new RestTemplate()` 的硬編碼行為，重構為向 Spring IoC 容器註冊 `RestTemplate` 的 Bean（配有 3 秒連線與讀取超時防護），並以建構子方式注入至 `PaymentAdapter`。
   * **連線超時與扣款重試**：`PaymentAdapter` 透過具備 3 秒 Timeout 防護的 RestTemplate 請求外部扣款，若因網路抖動或超時發生 `RestClientException`，透過 **Spring Retry** 自動進行最多 3 次的指數退避重試 (1s -> 2s -> 4s)。若重試全部失敗，則觸發降級方法發布扣款失敗事件，引導 Saga 執行自動庫存釋放與訂單取消。
   * **假性失敗自癒**：Saga 協調取消訂單時，防腐層會再次比對外部實際扣款交易流水（等冪性），若發現先前超時的扣款請求其實已在外部成功執行（假性失敗），將自動發起退款補償，保障資金流一致性。
   * **退款補償重試佇列**：當外部退款因服務故障回傳 500 錯誤或發生連線異常時，自動將退款任務持久化寫入 MySQL **`t_payment_refund_retry_task`** 表中（初始為 `PENDING`），交由定時排程器 `RefundRetryScheduler` 進行自癒重試。

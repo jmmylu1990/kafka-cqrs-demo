@@ -16,7 +16,6 @@ import org.axonframework.commandhandling.CommandHandler;
 import org.axonframework.eventhandling.EventHandler;
 import org.axonframework.eventhandling.gateway.EventGateway;
 import org.springframework.http.ResponseEntity;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Recover;
 import org.springframework.retry.annotation.Retryable;
@@ -53,16 +52,12 @@ public class PaymentAdapter {
 
     public PaymentAdapter(EventGateway eventGateway,
                           AxonWalletTransactionRepository transactionRepository,
-                          AxonRefundRetryTaskRepository refundRetryTaskRepository) {
+                          AxonRefundRetryTaskRepository refundRetryTaskRepository,
+                          RestTemplate paymentRestTemplate) {
         this.eventGateway = eventGateway;
         this.transactionRepository = transactionRepository;
         this.refundRetryTaskRepository = refundRetryTaskRepository;
-
-        // 配置具備 3 秒連接與讀取超時防護的 RestTemplate
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(3000);
-        factory.setReadTimeout(3000);
-        this.restTemplate = new RestTemplate(factory);
+        this.restTemplate = paymentRestTemplate;
     }
 
     /**
