@@ -33,7 +33,7 @@
 * **訂單快取 TTL、防雪崩抖動與快取失效 (Cache Eviction & Avalanche Protection) 機制**：
   * **過期限制與防雪崩抖動**：訂單寫入 Redis 時，為防範**快取雪崩**（大量 Key 同時過期），在 1 天（24 小時）的基礎上隨機疊加 **0~60 分鐘的抖動時間 (Jitter)**，離散過期時間，並避免歷史垃圾數據無限期吞噬快取伺服器記憶體。
   * **失效快取**：當訂單狀態變更時，改用 Cache Eviction 直接刪除 Redis 快取 Key，完美規避因網路延遲等並發時序錯亂造成的舊資料覆蓋新資料（快取髒數據）問題。
-  * **快取延遲載入與 SOLID 解耦**：查詢端實現 **Cache-Aside 模式**。為了落實單一職責原則 (SRP) 與依賴反轉原則 (DIP)，已將原先控制器的 DCL 快取防禦鎖、MySQL 降級查詢、Jackson 序列化與 Metrics 計數等底層細節完全抽離，封裝於獨立的 `OrderQueryService` 與實作中，Controller 僅做服務委派。
+  * **快取延遲載入與 SOLID 解耦**：查詢端與商品查詢端實現 **Cache-Aside 模式**。為了落實單一職責原則 (SRP) 與依賴反轉原則 (DIP)，已將原先控制器的 DCL 快取防禦鎖、MySQL 降級查詢、Jackson 序列化與 Metrics 計數等底層細節完全抽離，封裝於獨立的 `OrderQueryService` 與 `ProductQueryService` 中，Controller 僅做服務委派，徹底免除與 Redis、Redisson 及資料庫 Repository 的直接強耦合。
 * **防範快取擊穿、穿透與動態快取載入 (Double-Checked Locking & Penetration Protection)**：
   * **防快取擊穿**：在訂單與商品查詢端實作 Double-Checked Locking 機制，當 Redis 快取未命中時，使用 Redisson 分散式鎖進行併發防護，確保只有一個執行緒去 MySQL 查詢並回寫 Redis，避免海量請求同時穿透資料庫。
   * **防快取穿透 (空值快取)**：查詢不存在的訂單 ID 時，快取端會將值為 `"NULL"` 的防穿透標記寫入 Redis，並設定短效的 **5 分鐘 TTL**。後續請求若命中該標記則直接回傳訂單不存在，不再穿透查詢資料庫，徹底瓦解惡意查詢攻擊。
@@ -45,13 +45,14 @@
   * **通用異常處理器**：配置 Spring Kafka `CommonErrorHandler`，結合自訂 `DeadLetterPublishingRecoverer` 目的地解析器。針對資料庫連線、樂觀鎖衝突等暫時性異常，自動進行 3 次重試（間隔 1 秒）。重試失敗後，將訊息投遞到 `inventory-sync-events.DLQ` 分割區 0，解決分割區數量不對等的 Destination resolver 警告。
   * **快速失敗與死信**：將 JSON 反序列化解析錯誤 (JsonProcessingException) 設定為不可重試異常，略過重試直接送入死信佇列。
   * **死信落庫與警報**：設有 DLQ 監聽器，一旦訊息降級進入死信，除了模擬發送簡訊警報，亦會將死信內容持久化寫入 `t_axon_dlq_message` 資料表中，初始狀態為 `PENDING`。
-  * **一鍵重試自癒 API**：提供 `POST /axonsaga/api/dlq/reprocess` 端點。當管理員觸發此 API 時，會從資料庫撈取所有 `PENDING` 死信，解析 JSON 以 `productId` 作為 Partition Key，重新投遞回主要主題 `inventory-sync-events`，保證同商品事件的順序性。重處理成功後，將死信狀態變更為 `REPROCESSED`。
+  * **一鍵重試自癒 API**：提供 `POST /axonsaga/api/dlq/reprocess` 端點。為符合 SOLID 原則，已將死信資料表查詢、Kafka 重新投遞與資料庫狀態保存邏輯完全從 Controller 抽離，封裝至獨立的 `DlqReprocessService` 服務中。當管理員觸發此 API 時，會從資料庫撈取所有 `PENDING` 死信，解析 JSON 以 `productId` 作為 Partition Key，重新投遞回主要主題 `inventory-sync-events`，保證同商品事件的順序性。重處理成功後，將死信狀態變更為 `REPROCESSED`。
 * **模擬外部金流防腐層 (PaymentAdapter/ACL) 與超時/失敗自癒重試機制**：
   * **金流解耦與依賴反轉 (DIP)**：移除本地資料庫強耦合，解耦為獨立外部金流 API (`MockExternalPaymentController`)。為了落實依賴反轉原則 (DIP)，已將原先 `PaymentAdapter` 中手動 `new RestTemplate()` 的硬編碼行為，重構為向 Spring IoC 容器註冊 `RestTemplate` 的 Bean（配有 3 秒連線與讀取超時防護），並以建構子方式注入至 `PaymentAdapter`。
   * **連線超時與扣款重試**：`PaymentAdapter` 透過具備 3 秒 Timeout 防護的 RestTemplate 請求外部扣款，若因網路抖動或超時發生 `RestClientException`，透過 **Spring Retry** 自動進行最多 3 次的指數退避重試 (1s -> 2s -> 4s)。若重試全部失敗，則觸發降級方法發布扣款失敗事件，引導 Saga 執行自動庫存釋放與訂單取消。
   * **假性失敗自癒**：Saga 協調取消訂單時，防腐層會再次比對外部實際扣款交易流水（等冪性），若發現先前超時的扣款請求其實已在外部成功執行（假性失敗），將自動發起退款補償，保障資金流一致性。
   * **退款補償重試佇列**：當外部退款因服務故障回傳 500 錯誤或發生連線異常時，自動將退款任務持久化寫入 MySQL **`t_payment_refund_retry_task`** 表中（初始為 `PENDING`），交由定時排程器 `RefundRetryScheduler` 進行自癒重試。
   * **背景退避重試與最高警報**：排程器每 10 秒執行一次，對待處理任務發起重試並採用指數退避算法 (30s * 2^retryCount) 計算下一次重試時間。若重試 5 次上限仍失敗，則將狀態設為 `FAILED` 並發布最高優先級警報日誌，供工程師手動介入。
+  * **動態網址建構與解耦 (OCP)**：在訂單寫入端控制器 `AxonSageOrderCommandController` 中，付款確認後所回傳之 `queryUrl` 與 `Location` 標頭改採 Spring 原生 `ServletUriComponentsBuilder` 從當前 HTTP 請求上下文中動態推導 Host、Port 與 Scheme，徹底清除了原先對宿主機網址（如 `http://localhost:8081`）的硬編碼，實現運行環境的完全解耦與開閉原則之落實。
 * **Axon 事件快照機制 (Event Store Snapshotting)**：
   * **快照觸發**：配置 `SnapshotTriggerDefinition` 並關聯訂單聚合根 `AxonSagaOrderAggregate`，將快照事件數閾值設定為 2。當該聚合實體累積產生的歷史事件達到 2 筆時（例如完成「訂單建立」與「庫存預留」），系統會自動非同步觸發快照生成。
   * **快照持久化與還原**：產生的快照將序列化並儲存至資料庫的 `snapshot_event_entry` 表。後續加載聚合時，Axon 會直接讀取最新快照還原聚合狀態，並僅復原/重放快照之後產生的增量事件，大幅度降低隨歷史事件流增長而帶來的聚合重建延遲與資料庫讀取開銷。

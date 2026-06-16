@@ -108,8 +108,11 @@ public class AxonSageOrderCommandController {
         // 1. 異步發送 Command，不阻塞等待背景 Saga/金流 API 處理
         commandGateway.send(new ProcessPaymentCommand(orderId, userId));
         
-        // 2. 建立查詢狀態的 Location URL
-        String queryUrl = "http://localhost:8081/axonsaga/api/orders/" + orderId;
+        // 2. 建立查詢狀態的 Location URL (動態由 ServletUriComponentsBuilder 生成以符合 OCP)
+        String queryUrl = org.springframework.web.servlet.support.ServletUriComponentsBuilder.fromCurrentContextPath()
+                .path("/axonsaga/api/orders/{id}")
+                .buildAndExpand(orderId)
+                .toUriString();
         
         // 3. 封裝 REST Response Body
         Map<String, Object> responseBody = new HashMap<>();
