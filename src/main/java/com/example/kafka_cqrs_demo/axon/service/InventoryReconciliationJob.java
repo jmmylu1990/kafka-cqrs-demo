@@ -79,20 +79,20 @@ public class InventoryReconciliationJob {
         List<AxonInventoryEntity> mysqlInventories = inventoryRepository.findAll();
         for (AxonInventoryEntity mysqlInv : mysqlInventories) {
             String productId = mysqlInv.getProductId();
-            String lockKey = "lock:product:" + productId;
+            String lockKey = "{product:" + productId + "}:lock:product";
             RLock lock = redissonClient.getLock(lockKey);
             boolean locked = false;
             try {
                 // 嘗試獲取分散式鎖，避免影響正常的交易進行
                 locked = lock.tryLock(3, TimeUnit.SECONDS);
                 if (locked) {
-                    String stockKey = "product:" + productId + ":stock";
-                    String reservedKey = "product:" + productId + ":reserved";
+                    String stockKey = "{product:" + productId + "}:stock";
+                    String reservedKey = "{product:" + productId + "}:reserved";
                     RBucket<String> stockBucket = redissonClient.getBucket(stockKey, StringCodec.INSTANCE);
                     RBucket<String> reservedBucket = redissonClient.getBucket(reservedKey, StringCodec.INSTANCE);
 
                     // 檢查商品最近是否有異動，若在 5 分鐘 (300,000ms) 內，跳過此商品的庫存對帳以防覆寫 Kafka 異步同步中數據
-                    RBucket<String> productUpdatedAtBucket = redissonClient.getBucket("product:" + productId + ":updatedAt", StringCodec.INSTANCE);
+                    RBucket<String> productUpdatedAtBucket = redissonClient.getBucket("{product:" + productId + "}:updatedAt", StringCodec.INSTANCE);
                     String productUpdatedAtStr = productUpdatedAtBucket.get();
                     if (productUpdatedAtStr != null) {
                         try {

@@ -50,8 +50,8 @@ public class AxonSageProductQueryController {
     public ResponseEntity<ProductStockDto> getProductStock(@PathVariable String productId) {
         log.info("查詢商品庫存請求，ID: {}", productId);
 
-        String stockKey = "product:" + productId + ":stock";
-        String reservedKey = "product:" + productId + ":reserved";
+        String stockKey = "{product:" + productId + "}:stock";
+        String reservedKey = "{product:" + productId + "}:reserved";
 
         RBucket<String> stockBucket = redissonClient.getBucket(stockKey, StringCodec.INSTANCE);
         RBucket<String> reservedBucket = redissonClient.getBucket(reservedKey, StringCodec.INSTANCE);
@@ -64,7 +64,7 @@ public class AxonSageProductQueryController {
             meterRegistry.counter("cache.requests", "type", "product", "result", "hit").increment();
         } else {
             // 2. 獲取 Redis 分散式鎖，防範快取擊穿
-            String lockKey = "lock:product:query:" + productId;
+            String lockKey = "{product:" + productId + "}:lock:query";
             RLock lock = redissonClient.getLock(lockKey);
             boolean locked = false;
             try {
@@ -90,7 +90,7 @@ public class AxonSageProductQueryController {
                             stockBucket.set(stockVal, ttl, timeUnit);
                             reservedBucket.set(reservedVal, ttl, timeUnit);
 
-                            String isHotKey = "product:" + productId + ":isHot";
+                            String isHotKey = "{product:" + productId + "}:isHot";
                             redissonClient.getBucket(isHotKey, StringCodec.INSTANCE).set(isHot ? "true" : "false", ttl, timeUnit);
 
                             log.info("[DCL-Product] 從 MySQL 讀取成功並已回寫 Redis 快取 (是否為熱商品: {}, TTL: {} {}): {}",

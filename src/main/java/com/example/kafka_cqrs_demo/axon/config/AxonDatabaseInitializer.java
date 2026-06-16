@@ -49,9 +49,9 @@ public class AxonDatabaseInitializer implements CommandLineRunner {
                 inventoryRepository.save(entity);
             });
         }
-        redisTemplate.opsForValue().set("product:PROD-001:stock", "100", 1, TimeUnit.DAYS);
-        redisTemplate.opsForValue().set("product:PROD-001:reserved", "0", 1, TimeUnit.DAYS);
-        redisTemplate.opsForValue().set("product:PROD-001:isHot", "true", 1, TimeUnit.DAYS);
+        redisTemplate.opsForValue().set("{product:PROD-001}:stock", "100", 1, TimeUnit.DAYS);
+        redisTemplate.opsForValue().set("{product:PROD-001}:reserved", "0", 1, TimeUnit.DAYS);
+        redisTemplate.opsForValue().set("{product:PROD-001}:isHot", "true", 1, TimeUnit.DAYS);
 
         // PROD-002 (冷商品 - 不預熱快取，清除快取以防殘留)
         if (!inventoryRepository.existsById("PROD-002")) {
@@ -63,9 +63,9 @@ public class AxonDatabaseInitializer implements CommandLineRunner {
                 inventoryRepository.save(entity);
             });
         }
-        redisTemplate.delete("product:PROD-002:stock");
-        redisTemplate.delete("product:PROD-002:reserved");
-        redisTemplate.delete("product:PROD-002:isHot");
+        redisTemplate.delete("{product:PROD-002}:stock");
+        redisTemplate.delete("{product:PROD-002}:reserved");
+        redisTemplate.delete("{product:PROD-002}:isHot");
 
         // PROD-003 (冷商品 - 不預熱快取，清除快取以防殘留)
         if (!inventoryRepository.existsById("PROD-003")) {
@@ -77,9 +77,9 @@ public class AxonDatabaseInitializer implements CommandLineRunner {
                 inventoryRepository.save(entity);
             });
         }
-        redisTemplate.delete("product:PROD-003:stock");
-        redisTemplate.delete("product:PROD-003:reserved");
-        redisTemplate.delete("product:PROD-003:isHot");
+        redisTemplate.delete("{product:PROD-003}:stock");
+        redisTemplate.delete("{product:PROD-003}:reserved");
+        redisTemplate.delete("{product:PROD-003}:isHot");
 
         // PROD-DLQ-TEST (熱點商品 - 預熱快取)
         if (!inventoryRepository.existsById("PROD-DLQ-TEST")) {
@@ -91,9 +91,9 @@ public class AxonDatabaseInitializer implements CommandLineRunner {
                 inventoryRepository.save(entity);
             });
         }
-        redisTemplate.opsForValue().set("product:PROD-DLQ-TEST:stock", "100", 1, TimeUnit.DAYS);
-        redisTemplate.opsForValue().set("product:PROD-DLQ-TEST:reserved", "0", 1, TimeUnit.DAYS);
-        redisTemplate.opsForValue().set("product:PROD-DLQ-TEST:isHot", "true", 1, TimeUnit.DAYS);
+        redisTemplate.opsForValue().set("{product:PROD-DLQ-TEST}:stock", "100", 1, TimeUnit.DAYS);
+        redisTemplate.opsForValue().set("{product:PROD-DLQ-TEST}:reserved", "0", 1, TimeUnit.DAYS);
+        redisTemplate.opsForValue().set("{product:PROD-DLQ-TEST}:isHot", "true", 1, TimeUnit.DAYS);
 
         log.info("[AxonDatabaseInitializer] 開始初始化 Axon 錢包測試數據...");
 

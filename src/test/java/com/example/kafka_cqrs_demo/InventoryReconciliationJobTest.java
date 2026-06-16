@@ -51,19 +51,19 @@ public class InventoryReconciliationJobTest {
         RLock mockLock = mock(RLock.class);
         when(mockLock.tryLock(anyLong(), any(TimeUnit.class))).thenReturn(true);
         when(mockLock.isHeldByCurrentThread()).thenReturn(true);
-        when(redissonClient.getLock("lock:product:PROD-001")).thenReturn(mockLock);
+        when(redissonClient.getLock("{product:PROD-001}:lock:product")).thenReturn(mockLock);
 
         RBucket<String> mockStockBucket = mock(RBucket.class);
         when(mockStockBucket.get()).thenReturn("80"); // Drift
-        doReturn(mockStockBucket).when(redissonClient).getBucket("product:PROD-001:stock", StringCodec.INSTANCE);
+        doReturn(mockStockBucket).when(redissonClient).getBucket("{product:PROD-001}:stock", StringCodec.INSTANCE);
 
         RBucket<String> mockReservedBucket = mock(RBucket.class);
         when(mockReservedBucket.get()).thenReturn("10"); // Correct
-        doReturn(mockReservedBucket).when(redissonClient).getBucket("product:PROD-001:reserved", StringCodec.INSTANCE);
+        doReturn(mockReservedBucket).when(redissonClient).getBucket("{product:PROD-001}:reserved", StringCodec.INSTANCE);
 
         RBucket<String> mockUpdatedAtBucket = mock(RBucket.class);
         when(mockUpdatedAtBucket.get()).thenReturn(null); // No recent update
-        doReturn(mockUpdatedAtBucket).when(redissonClient).getBucket("product:PROD-001:updatedAt", StringCodec.INSTANCE);
+        doReturn(mockUpdatedAtBucket).when(redissonClient).getBucket("{product:PROD-001}:updatedAt", StringCodec.INSTANCE);
 
         RKeys mockKeys = mock(RKeys.class);
         when(mockKeys.getKeysByPattern(anyString())).thenReturn(Collections.emptyList());

@@ -24,9 +24,9 @@
 ### 2. Axon Saga 事件溯源與高併發設計 (Axon Module)
 本模組實作了基於領域驅動設計 (DDD) 的事件溯源、Saga 分散式事務協調與高併發寫入優化：
 * **去 Axon Server 架構**：停用 Axon Server（`axon.axonserver.enabled: false`），改由本地 MySQL 與 Redis 處理狀態。
-* **Redisson 分散式鎖庫存扣減**：
-  * 收到 `ReserveStockCommand` 時，透過 Redisson Client 的商品分散式鎖 (`RLock`) 鎖定商品 ID。
-  * 在臨界區內執行 Redis `RBucket` 與 `RMap` 的原子庫存檢查、扣減與記錄，徹底防範高併發下的超賣問題，並利用 Watchdog 機制自動續期，防止鎖提前失效。
+* **Redis Lua 腳本庫存扣減 (Cluster 相容)**：
+  * 收到 `ReserveStockCommand` 時，改用 Redis Lua 腳本進行原子化的庫存預留與扣減，將所有讀寫判定與狀態更新限縮在 Redis 單執行緒內部，避免 Java 端在臨界區進行網路 RTT 往返及 tryLock 阻塞等待，提升併發吞吐量並預防執行緒池飢餓。
+  * 採用叢集相容的 **Hash Tag 鍵設計 (`{product:productId}:*`)**，確保同一個商品的所有相關 Redis 鍵（如可用庫存 `{product:productId}:stock`、已預留庫存 `{product:productId}:reserved`、冷熱標記 `{product:productId}:isHot`、更新時間、DCL 互斥鎖等）被雜湊至同一個 Redis 節點 Slot，徹底避免在 Redis 叢集模式下執行 Lua 腳本時拋出 `CROSSSLOT` 錯誤。
 * **Kafka 最終一致性同步與寫入優化**：
   * Redis 扣減或釋放成功後，發送 `InventorySyncEvent` 訊息至 Kafka `inventory-sync-events` 主題，以 **`productId`** 作為 Partition Key，保證同一商品的所有更新序列化在同一個分割區，避免跨執行緒資料庫寫入競爭。
   * **背景 Consumer 與策略模式解耦 (OCP)**：背景 Consumer 異步落庫寫回 MySQL，並實作 **JPA 樂觀鎖 (`@Version`)** 防護與 **衝突自動重試機制**，確保最終一致性的絕對安全。為了落實開放封閉原則 (OCP)，本專案已導入**策略模式 (Strategy Pattern)**，將庫存預留、確認扣減、釋放、退款等具體同步業務完全拆分、封裝至獨立的 `InventorySyncHandler` 策略實作中，消除冗長的 `switch-case` 分流，擴充新同步動作時不需修改消費端主類別。
@@ -289,11 +289,11 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 * **Redis 快取檢查**：
   ```bash
   # 可用庫存扣減為 95
-  redis-cli GET product:PROD-001:stock
+  redis-cli GET "{product:PROD-001}:stock"
   # 預留庫存增加為 5
-  redis-cli GET product:PROD-001:reserved
+  redis-cli GET "{product:PROD-001}:reserved"
   # 訂單預留哈希表狀態為 RESERVED
-  redis-cli HGETALL order:{orderId}:reservation
+  redis-cli HGETALL "order:{orderId}:reservation"
   ```
 * **MySQL SQL 驗證**：
   ```sql
@@ -320,9 +320,9 @@ curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/pay' \
 * **Redis 快取檢查**：
   ```bash
   # 預留庫存歸零為 0
-  redis-cli GET product:PROD-001:reserved
+  redis-cli GET "{product:PROD-001}:reserved"
   # 訂單預留雜湊狀態更新為 COMPLETED
-  redis-cli HGET order:{orderId}:reservation status
+  redis-cli HGET "order:{orderId}:reservation" status
   ```
 * **MySQL SQL 驗證**：
   ```sql
@@ -371,11 +371,11 @@ curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/pay' \
 * **Redis 快取檢查**：
   ```bash
   # 可用庫存安全加回，維持 95
-  redis-cli GET product:PROD-001:stock
+  redis-cli GET "{product:PROD-001}:stock"
   # 預留庫存歸零為 0
-  redis-cli GET product:PROD-001:reserved
+  redis-cli GET "{product:PROD-001}:reserved"
   # 狀態變更為 RELEASED
-  redis-cli HGET order:{orderId}:reservation status
+  redis-cli HGET "order:{orderId}:reservation" status
   ```
 * **MySQL SQL 驗證**：
   ```sql
@@ -408,9 +408,9 @@ curl --location --request POST 'http://localhost:8081/axonsaga/api/orders/cancel
 * **Redis 快取檢查**：
   ```bash
   # 可用庫存退回，由 95 增加為 100
-  redis-cli GET product:PROD-001:stock
+  redis-cli GET "{product:PROD-001}:stock"
   # 狀態更新為 REFUNDED
-  redis-cli HGET order:{場景一成功的orderId}:reservation status
+  redis-cli HGET "order:{場景一成功的orderId}:reservation" status
   ```
 * **MySQL SQL 驗證**：
   ```sql
@@ -446,11 +446,11 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 * **Redis 快取檢查**：
   ```bash
   # 可用庫存依然維持為 0
-  redis-cli GET product:PROD-003:stock
+  redis-cli GET "{product:PROD-003}:stock"
   # 預留庫存也維持為 0
-  redis-cli GET product:PROD-003:reserved
+  redis-cli GET "{product:PROD-003}:reserved"
   # 不會有此訂單的 reservation 雜湊表記錄
-  redis-cli KEYS order:{orderId}:reservation
+  redis-cli KEYS "order:{orderId}:reservation"
   ```
 * **MySQL SQL 驗證**：
   ```sql
@@ -726,7 +726,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 ### 1. 驗證商品庫存查詢 DCL
 * **清除快取**：
   ```bash
-  docker exec cqrs-redis redis-cli DEL product:PROD-001:stock product:PROD-001:reserved product:PROD-001:updatedAt
+  docker exec cqrs-redis redis-cli DEL "{product:PROD-001}:stock" "{product:PROD-001}:reserved" "{product:PROD-001}:updatedAt"
   ```
 * **發送查詢請求**：
   ```bash
@@ -743,7 +743,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 ### 2. 驗證下單時「冷商品庫存動態載入（DCL）」
 * **清除快取（模擬冷商品不在 Redis 中）**：
   ```bash
-  docker exec cqrs-redis redis-cli DEL product:PROD-002:stock product:PROD-002:reserved
+  docker exec cqrs-redis redis-cli DEL "{product:PROD-002}:stock" "{product:PROD-002}:reserved"
   ```
 * **發送下單請求**（購買 2 件 `PROD-002`）：
   ```bash
@@ -756,7 +756,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
   ```text
   [InventoryService] Redis 中找不到商品 PROD-002 的庫存，嘗試從 MySQL 載入 (DCL)
   [InventoryService] 成功從 MySQL 載入商品 PROD-002 的庫存至 Redis (庫存: 5, 預留: 0)
-  [InventoryService] Redisson 庫存預留成功，扣除產品 PROD-002 可用庫存 2 件，轉為預留狀態
+  [InventoryService] Lua 庫存預留成功，扣除產品 PROD-002 可用庫存 2 件，轉為預留狀態
   ```
 
 ### 3. 驗證訂單詳情查詢 DCL
@@ -780,14 +780,14 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 ### 1. 驗證啟動時分類預熱
 * **啟動服務並檢查 Redis 所有的 product 鍵**：
   ```bash
-  docker exec cqrs-redis redis-cli KEYS "product:*"
+  docker exec cqrs-redis redis-cli KEYS "*product:*"
   ```
 * **預期結果**：
   * 只會看到 `PROD-001` 與 `PROD-DLQ-TEST` 的快取鍵。
   * 查詢其餘的 `PROD-002` 及 `PROD-003` 鍵應不存在。
 * **驗證熱商品快取 TTL (應接近 1 天/86400秒)**：
   ```bash
-  docker exec cqrs-redis redis-cli TTL product:PROD-001:stock
+  docker exec cqrs-redis redis-cli TTL "{product:PROD-001}:stock"
   ```
 
 ### 2. 驗證冷商品動態載入與自動過期 (TTL 60 秒)
@@ -797,12 +797,12 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
    ```
 2. **立刻檢查 Redis 中的 TTL**：
    ```bash
-   docker exec cqrs-redis redis-cli TTL product:PROD-002:stock
+   docker exec cqrs-redis redis-cli TTL "{product:PROD-002}:stock"
    ```
    * **預期結果**：回傳值應為小於或等於 `60` 的正整數。
 3. **等待 60 秒後，再次查詢 Redis 鍵**：
    ```bash
-   docker exec cqrs-redis redis-cli EXISTS product:PROD-002:stock
+   docker exec cqrs-redis redis-cli EXISTS "{product:PROD-002}:stock"
    ```
    * **預期結果**：回傳 `(integer) 0`，代表冷商品快取已過期並自動釋放。
 
@@ -819,7 +819,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
    ```
 3. **再次檢查 Redis 中 `product:PROD-002:stock` 的 TTL**：
    ```bash
-   docker exec cqrs-redis redis-cli TTL product:PROD-002:stock
+   docker exec cqrs-redis redis-cli TTL "{product:PROD-002}:stock"
    ```
    * **預期結果**：TTL 依然是短效的（重設為 60 秒內），證明扣減等更新操作並不會使冷商品的快取變為永久快取。
 
@@ -923,7 +923,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 ### 1. 手動製造 Redis 庫存偏差
 * **手動使用 Redis-cli 竄改 `PROD-001` 的可用庫存為錯誤數值（例如 50 件，MySQL 實際應為 100 件）**：
   ```bash
-  redis-cli SET product:PROD-001:stock 50
+  redis-cli SET "{product:PROD-001}:stock" 50
   ```
 
 ### 2. 手動觸發對帳與自癒 API
@@ -953,7 +953,7 @@ curl --location 'http://localhost:8081/axonsaga/api/orders' \
 ### 3. 驗證 Redis 快取已被自動修正
 * **重新查詢 Redis 快取可用庫存**：
   ```bash
-  redis-cli GET product:PROD-001:stock
+  redis-cli GET "{product:PROD-001}:stock"
   ```
   * **預期結果**：回傳值已被成功更正回 `100`。
 * **觀察控制台對帳日誌**：
